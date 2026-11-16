@@ -28,7 +28,7 @@ export class LFM3Vision {
     if (p1) {
       const enc = gpu.device.createCommandEncoder();
       const n = p0.rows * p0.K;
-      gpu.dispatch(enc, K.addInto, [gpu.uniform(new Uint32Array([n, 0, 0, 0])), p1.buf, p0.buf], [Math.min(Math.ceil(n / 256), 65535), Math.ceil(n / 256 / 65535)]);
+      gpu.dispatch(enc, K.addInto, [new Uint32Array([n, 0, 0, 0]), p1.buf, p0.buf], [Math.min(Math.ceil(n / 256), 65535), Math.ceil(n / 256 / 65535)]);
       await gpu.run(() => {}, enc);
       gpu.free(p1.buf);
       delete v.w['v.patch_embd.weight.1'];
@@ -52,16 +52,12 @@ export class LFM3Vision {
       patch: kv['clip.vision.patch_size'], merge: kv['clip.vision.spatial_merge_size'],
     };
     this.ropeBase = 1e6;
-    this._u = [];
   }
 
   #u(vals, floats = []) {
-    const a = new Uint32Array(Math.max(4, Math.ceil(vals.length / 4) * 4));
-    const f = new Float32Array(a.buffer);
+    const a = new Uint32Array(vals.length), f = new Float32Array(a.buffer);
     vals.forEach((v, i) => { if (floats.includes(i)) f[i] = v; else a[i] = v; });
-    const b = this.gpu.uniform(a);
-    this._u.push(b);
-    return b;
+    return a;
   }
 
   #mm(enc, name, X, Y, T, bias) {
@@ -77,7 +73,6 @@ export class LFM3Vision {
 
   async #submit(enc) {
     await this.gpu.run(() => {}, enc);
-    for (const b of this._u.splice(0)) b.destroy();
   }
 
   /**

@@ -32,7 +32,12 @@
 <div class="row"><label style="flex:0">Context</label><input id="ctx" type="number" value="4096" step="1024" min="1024" style="width:110px;flex:0"></div>
 <div id="bar"><div></div></div>
 <div class="row"><textarea id="prompt" rows="3" placeholder="Say something">What's the capital of France? One sentence.</textarea></div>
-<div class="row" id="photoRow" hidden><label style="flex:0;white-space:nowrap"><input id="photo" type="file" accept="image/*" style="width:auto"></label><img id="thumb" alt="" style="max-height:56px;border-radius:6px;flex:0" hidden></div>
+<div class="row" id="photoRow" hidden><label style="flex:0;white-space:nowrap"><input id="photo" type="file" accept="image/*" style="width:auto"></label><img id="thumb" alt="" style="max-height:56px;border-radius:6px;flex:0" hidden>
+  <select id="detail" style="width:auto;flex:0" title="Image detail: more detail is slower">
+    <option value="65536">low detail (64 tokens)</option>
+    <option value="147456">medium (144 tokens)</option>
+    <option value="262144" selected>high (256 tokens)</option>
+  </select></div>
 <div class="row"><label style="flex:0;white-space:nowrap"><input id="thinking" type="checkbox" checked style="width:auto"> thinking</label><span id="status" class="tag" style="margin:0"></span><button id="send" disabled>Send</button></div>
 <div id="out"></div>
 <div id="stats"></div>
@@ -93,6 +98,7 @@ $('send').onclick = async () => {
   const text = $('prompt').value.trim();
   if (!text) return;
   $('send').disabled = true;
+  if (llm) llm.imageMaxPixels = Number($('detail').value);
   messages.push({ role: 'user', content: photo ? [{ type: 'image', image: photo }, text] : text });
   photo = null; $('photo').value = ''; $('thumb').hidden = true;
   const out = $('out');

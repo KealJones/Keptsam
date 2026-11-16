@@ -1,0 +1,89 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Keptsam kernel checks</title>
+<pre id="log"></pre>
+<script type="module">
+// Fast correctness checks for individual kernels against CPU math on random data (no model needed).
+import { openGpu } from '../src/gpu.js';
+import { repackQ4_0, dequantQ4_0, f32ToF16 } from '../src/quant.js';
+import * as K from '../src/kernels.js';
+const log = (...a) => { const s = a.join(' '); document.getElementById('log').textContent += s + '\n'; console.log(s); };
+const rnd = (n, s = 1) => Float32Array.from({ length: n }, () => (Math.random() * 2 - 1) * s);
+
+function randomQ4_0(rows, K) {
+  const blocks = rows * K / 32, b = new Uint8Array(blocks * 18);
+  for (let i = 0; i < blocks; i++) {
+    const h = f32ToF16(0.01 + Math.random() * 0.05); b[i * 18] = h & 255; b[i * 18 + 1] = h >> 8;
+    for (let j = 0; j < 16; j++) b[i * 18 + 2 + j] = (Math.random() * 256) | 0;
+  }
+  return b;
+}
+
+async function gemmCase(gpu, rows, Kd, T) {
+  const raw = randomQ4_0(rows, Kd);
+  const { qs, d, blocks } = repackQ4_0(raw);
+  const W = gpu.buffer(blocks * 16 + Math.ceil(blocks / 2) * 4);
+  gpu.device.queue.writeBuffer(W, 0, qs); gpu.device.queue.writeBuffer(W, blocks * 16, d);
+  const x = rnd(T * Kd), X = gpu.buffer(x.length * 4); gpu.device.queue.writeBuffer(X, 0, x);
+  const Y = gpu.buffer(T * rows * 4);
+  const u = gpu.uniform(new Uint32Array([rows, Kd, T, blocks * 4, rows, 0, Kd, 0]));
+  await gpu.run((enc) => gpu.dispatch(enc, K.gemmQ4_0, [u, W, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 32)]));
+  const y = new Float32Array(await gpu.read(Y, T * rows * 4));
+  const w = dequantQ4_0(raw);
+  let maxd = 0, maxv = 0;
+  for (let t = 0; t < T; t++) for (let r = 0; r < rows; r++) {
+    let s = 0; for (let k = 0; k < Kd; k++) s += w[r * Kd + k] * x[t * Kd + k];
+    maxd = Math.max(maxd, Math.abs(s - y[t * rows + r])); maxv = Math.max(maxv, Math.abs(s));
+  }
+  for (const b of [W, X, Y]) gpu.free(b);
+  const ok = maxd <= 1e-4 * Math.max(1, maxv);
+  log(`gemmQ4_0 rows ${rows} K ${Kd} T ${T}: max |diff| ${maxd.toExponential(2)} (max |y| ${maxv.toFixed(2)})`, ok ? 'ok' : 'FAIL');
+  return ok;
+}
+
+async function matvecCase(gpu, rows, Kd) {
+  const raw = randomQ4_0(rows, Kd);
+  const { qs, d, blocks } = repackQ4_0(raw);
+  const W = gpu.buffer(blocks * 16 + Math.ceil(blocks / 2) * 4);
+  gpu.device.queue.writeBuffer(W, 0, qs); gpu.device.queue.writeBuffer(W, blocks * 16, d);
+  const x = rnd(Kd), X = gpu.buffer(Kd * 4); gpu.device.queue.writeBuffer(X, 0, x);
+  const Y = gpu.buffer(rows * 4);
+  const g = Math.ceil(rows / 8);
+  await gpu.run((enc) => gpu.dispatch(enc, K.matvecQ4_0, [new Uint32Array([rows, Kd, 1, blocks * 4, rows, 0, Kd, 0]), W, X, Y], [Math.min(g, 4096), Math.ceil(g / 4096)]));
+  const y = new Float32Array(await gpu.read(Y, rows * 4));
+  const w = dequantQ4_0(raw);
+  let maxd = 0;
+  for (let r = 0; r < rows; r++) { let s = 0; for (let k = 0; k < Kd; k++) s += w[r * Kd + k] * x[k]; maxd = Math.max(maxd, Math.abs(s - y[r])); }
+  for (const b of [W, X, Y]) gpu.free(b);
+  const ok = maxd < 1e-4;
+  log(`matvecQ4_0 rows ${rows} K ${Kd}: max |diff| ${maxd.toExponential(2)}`, ok ? 'ok' : 'FAIL');
+  return ok;
+}
+
+async function topkCase(gpu, n) {
+  const l = rnd(n, 10);
+  const L = gpu.buffer(n * 4); gpu.device.queue.writeBuffer(L, 0, l);
+  const nw = Math.ceil(n / 256), C = gpu.buffer(nw * 16 * 8);
+  await gpu.run((enc) => gpu.dispatch(enc, K.topk16, [new Uint32Array([n, 0, 0, 0]), L, C], nw));
+  const u = new Uint32Array(await gpu.read(C, nw * 16 * 8));
+  let ok = true;
+  for (let w = 0; w < nw; w++) {
+    const slice = [...l.subarray(w * 256, Math.min(n, w * 256 + 256))].map((v, i) => [v, w * 256 + i]).sort((a, b) => b[0] - a[0]).slice(0, 16);
+    slice.forEach(([v, id], r) => { if (u[(w * 16 + r) * 2 + 1] !== id) ok = false; });
+  }
+  gpu.free(L); gpu.free(C);
+  log(`topk16 n ${n}:`, ok ? 'ok' : 'FAIL');
+  return ok;
+}
+
+try {
+  const gpu = await openGpu();
+  let ok = true;
+  for (const [r, k] of [[8, 32], [13, 2048], [300, 7680], [33000, 64]]) ok = (await matvecCase(gpu, r, k)) && ok;
+  if (new URLSearchParams(location.search).get('only') !== 'matvec') {
+  for (const n of [256, 1000, 128000]) ok = (await topkCase(gpu, n)) && ok;
+  for (const [r, k, t] of [[64, 64, 32], [100, 96, 5], [200, 256, 33], [130, 128, 64], [7, 32, 70]]) ok = (await gemmCase(gpu, r, k, t)) && ok;
+  }
+  window.__result = { ok };
+} catch (e) { log('ERROR', e.stack || e); window.__result = { ok: false }; }
+</script>

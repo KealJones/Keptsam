@@ -53,6 +53,8 @@ export class LFM3 {
      * starts with small submits instead of finding out the hard way (WebKit kills the GPU at ~3 s).
      */
     this.submitBudgetMs = 1000;
+    /** Single-token matmul: 'wide' (8 rows per workgroup) or 'row' (one workgroup per row). */
+    this.decodeKernel = 'wide';
     /** Estimates by batch size (rounded up to a power of 2): cost per token is not flat in the batch size. */
     this.est = new Map();
   }
@@ -88,26 +90,29 @@ export class LFM3 {
     for (const c of this.cache) if (c.state) q.writeBuffer(c.state, 0, new Float32Array(6 * this.nEmbd));
   }
 
-  #u(...vals) {
-    const a = new Uint32Array(Math.ceil(vals.length / 4) * 4);
-    const fv = new Float32Array(a.buffer);
-    vals.forEach((v, i) => { if (Number.isInteger(v)) a[i] = v; else fv[i] = v; });
-    return this.#keep(this.gpu.uniform(a));
-  }
-  #keep(b) { (this._uniforms ||= []).push(b); return b; }
-  #uf(ints, floats) { // explicit float slots
-    const a = new Uint32Array(Math.ceil(ints.length / 4) * 4);
-    const fv = new Float32Array(a.buffer);
-    ints.forEach((v, i) => { if (floats.includes(i)) fv[i] = v; else a[i] = v; });
-    return this.#keep(this.gpu.uniform(a));
+  // Uniform values for one dispatch (they go into the submit's uniform slots, see Gpu.dispatch).
+  #u(...vals) { return Uint32Array.from(vals); }
+  #uf(vals, floats) {
+    const a = new Uint32Array(vals.length), f = new Float32Array(a.buffer);
+    vals.forEach((v, i) => { if (floats.includes(i)) f[i] = v; else a[i] = v; });
+    return a;
   }
 
   #matmul(enc, name, X, Y, T, { yStride, yOff = 0, xStride, accumulate = 0 } = {}) {
     const w = this.w[name];
     const rows = w.rows;
+    const u = this.#u(rows, w.K, T, w.dOff, yStride ?? rows, yOff, xStride ?? w.K, accumulate);
+    if (T >= 4) {
+      this.gpu.dispatch(enc, K.gemmQ4_0, [u, w.buf, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 32)]);
+      return;
+    }
+    if (T === 1 && this.decodeKernel === 'wide') {
+      const g = Math.ceil(rows / 8);
+      this.gpu.dispatch(enc, K.matvecQ4_0, [u, w.buf, X, Y], [Math.min(g, 4096), Math.ceil(g / 4096)]);
+      return;
+    }
     const mt = T === 1 ? 1 : K.MAXT;
-    this.gpu.dispatch(enc, (MM[mt] ||= K.matmulQ4_0(mt)), [this.#u(rows, w.K, T, w.dOff, yStride ?? rows, yOff, xStride ?? w.K, accumulate), w.buf, X, Y],
-      [Math.min(rows, 32768), Math.ceil(rows / 32768), Math.ceil(T / mt)]);
+    this.gpu.dispatch(enc, (MM[mt] ||= K.matmulQ4_0(mt)), [u, w.buf, X, Y], [Math.min(rows, 32768), Math.ceil(rows / 32768), Math.ceil(T / mt)]);
   }
   #norm(enc, X, w, Y, rows, N, { mode = 0, xOff = 0, yOff = 0 } = {}) {
     this.gpu.dispatch(enc, K.rmsnorm, [this.#uf([N, mode, this.eps, N, xOff, yOff, 0, 0], [2]), X, w, Y], rows);
@@ -135,6 +140,8 @@ export class LFM3 {
     let est = this.est.get(bucket);
     if (est === undefined) est = Math.max(20, ...[...this.est].filter(([b]) => b < bucket).map(([, v]) => v));
     const per = Math.max(1, Math.min(this.nLayer, Math.floor(this.submitBudgetMs / (est * T))));
+    // Decode steps repeat the same dispatches on the same buffers, so their bind groups are reused.
+    gpu.beginPlan(T === 1 ? 'lfm3-decode' : null);
     let enc = gpu.device.createCommandEncoder();
     if (tokens) {
       gpu.device.queue.writeBuffer(a.tok, 0, new Uint32Array(tokens));
@@ -163,6 +170,7 @@ export class LFM3 {
     const head = this.w['token_embd.weight'];
     gpu.dispatch(enc, K.matmulQ6_K, [this.#u(head.rows, E, 0, 0), head.buf, a.headIn, a.logits], [Math.min(head.rows, 32768), Math.ceil(head.rows / 32768)]);
     const ms = await this.#submit(enc);
+    gpu.beginPlan(null);
     if (T > 1 && inEnc) learn(ms, inEnc);
     // Even one layer per submit would be over budget: read fewer tokens at a time (and more again when it's fast).
     const big = this.est.get(2 ** Math.ceil(Math.log2(this.chunk)));
@@ -172,9 +180,7 @@ export class LFM3 {
   }
 
   async #submit(enc) {
-    const ms = await this.gpu.run(() => {}, enc);
-    for (const b of this._uniforms.splice(0)) b.destroy();
-    return ms;
+    return this.gpu.run(() => {}, enc);
   }
 
   #layer(enc, i, T, pos0) {
@@ -212,6 +218,23 @@ export class LFM3 {
     gpu.dispatch(enc, K.swiglu, [this.#u(n, 0, 0, 0), a.g, a.u], [Math.min(Math.ceil(n / 256), 65535), Math.ceil(n / 256 / 65535)]);
     this.#matmul(enc, p + 'ffn_down.weight', a.g, a.y, T);
     this.#norm(enc, a.y, this.w[p + 'post_ffw_norm.weight'].buf, a.x, T, E, { mode: 1 });
+  }
+
+  /**
+   * Top candidates of the last token's logits, computed on the GPU: { values, ids } (16 per 256 tokens of the
+   * vocabulary). Much less to read back than every logit.
+   */
+  async candidates() {
+    const gpu = this.gpu, n = Math.ceil(this.vocab / 256);
+    this.cand ||= gpu.buffer(n * 16 * 8, 'activations');
+    gpu.beginPlan('lfm3-topk');
+    await gpu.run((enc) => gpu.dispatch(enc, K.topk16, [this.#u(this.vocab, 0, 0, 0), this.a.logits, this.cand], n));
+    gpu.beginPlan(null);
+    const u = new Uint32Array(await gpu.read(this.cand, n * 16 * 8));
+    const values = new Float32Array(n * 16), ids = new Uint32Array(n * 16);
+    const f = new Float32Array(u.buffer);
+    for (let i = 0; i < n * 16; i++) { values[i] = f[i * 2]; ids[i] = u[i * 2 + 1]; }
+    return { values, ids };
   }
 
   /** Logits of the last token from the latest forward(). */

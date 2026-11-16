@@ -35,7 +35,18 @@ export class Gpu {
     this.longestSubmit = 0;
     this.lost = null;
     device.lost.then((info) => { this.lost = info; });
+    // Per-submit uniforms: every dispatch gets a 256-byte slot in one buffer, written once before the submit,
+    // instead of a new GPUBuffer per dispatch (each one is a round trip to Safari's GPU process).
+    this.SLOTS = 2048;
+    this.frame = { buf: null, data: new ArrayBuffer(this.SLOTS * 256), slot: 0 };
+    this.frame.buf = this.buffer(this.SLOTS * 256, 'uniforms', GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    /** Bind groups by "plan:slot", reused while the pipeline and buffers are the same (e.g. every decode step). */
+    this.bindGroups = new Map();
+    this.plan = null;
   }
+
+  /** Names the sequence of dispatches that follows, so its bind groups can be reused next time (null: don't cache). */
+  beginPlan(name) { this.plan = name; }
 
   get maxBinding() { return this.device.limits.maxStorageBufferBindingSize; }
 
@@ -67,24 +78,43 @@ export class Gpu {
   }
 
   /** Compiles (once) a compute pipeline for WGSL source. */
-  pipeline(code, entry = 'main') {
-    const key = entry + '\n' + code;
-    let p = this.pipelines.get(key);
+  pipeline(code) {
+    let p = this.pipelines.get(code);
     if (!p) {
       const module = this.device.createShaderModule({ code });
-      p = this.device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: entry } });
-      this.pipelines.set(key, p);
+      p = this.device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+      this.pipelines.set(code, p);
     }
     return p;
   }
 
-  /** Records one dispatch: `bindings` is an array of buffers bound at 0..n in order. */
+  /**
+   * Records one dispatch. `bindings` are bound at 0..n in order: GPU buffers, or (first) a Uint32Array of
+   * uniform values, which goes into this submit's uniform slots.
+   */
   dispatch(enc, code, bindings, groups) {
     const p = this.pipeline(code);
-    const bg = this.device.createBindGroup({
-      layout: p.getBindGroupLayout(0),
-      entries: bindings.map((b, i) => ({ binding: i, resource: b.buffer ? b : { buffer: b } })),
+    const res = bindings.map((b) => {
+      if (!ArrayBuffer.isView(b)) return b;
+      const f = this.frame;
+      if (f.slot >= this.SLOTS) throw new Error('too many dispatches in one submit');
+      new Uint32Array(f.data, f.slot * 256, b.length).set(new Uint32Array(b.buffer, b.byteOffset, b.length));
+      return { buffer: f.buf, offset: 256 * f.slot++, size: 256 };
     });
+    const key = this.plan && `${this.plan}:${this.frame.slot}`;
+    let hit = key && this.bindGroups.get(key);
+    if (!hit || hit.p !== p || hit.res.length !== res.length || hit.res.some((r, i) => (r.buffer || r) !== (res[i].buffer || res[i]))) {
+      const bg = this.device.createBindGroup({
+        layout: p.getBindGroupLayout(0),
+        entries: res.map((r, i) => ({ binding: i, resource: r.buffer ? r : { buffer: r } })),
+      });
+      hit = { p, res, bg };
+      if (key) {
+        if (this.bindGroups.size > 4096) this.bindGroups.clear();
+        this.bindGroups.set(key, hit);
+      }
+    }
+    const bg = hit.bg;
     const pass = enc.beginComputePass();
     pass.setPipeline(p);
     pass.setBindGroup(0, bg);
@@ -94,9 +124,17 @@ export class Gpu {
   }
 
   /** Submits `record(encoder)` as one command buffer and waits for the GPU, timing it. */
+  /** Writes this submit's uniform slots to the GPU (queued ahead of the submit) and starts over. */
+  flush() {
+    const f = this.frame;
+    if (f.slot) this.device.queue.writeBuffer(f.buf, 0, f.data, 0, f.slot * 256);
+    f.slot = 0;
+  }
+
   async run(record, enc = this.device.createCommandEncoder()) {
     record(enc);
     const t0 = performance.now();
+    this.flush();
     this.device.queue.submit([enc.finish()]);
     await this.device.queue.onSubmittedWorkDone();
     const ms = performance.now() - t0;

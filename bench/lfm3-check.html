@@ -35,6 +35,8 @@ try {
   await m.forward(ref.toks);
   log('prefill', ref.toks.length, 'tokens in', (performance.now() - t0).toFixed(0), 'ms');
   const l = await m.logits();
+  const cand = await m.candidates();
+  log('GPU top candidate', cand.ids[[...cand.values.keys()].sort((a, b) => cand.values[b] - cand.values[a])[0]], 'argmax', argmax(l));
   let maxd = 0; for (let i = 0; i < l.length; i++) maxd = Math.max(maxd, Math.abs(l[i] - ref.last[i]));
   log('last logits: max |diff| vs llama.cpp', maxd.toFixed(4), 'top5 ours', topk(l, 5), 'ref', topk(ref.last, 5));
   const gen = [];

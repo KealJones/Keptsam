@@ -118,8 +118,7 @@ export class Keptsam {
     let text = '';
     for (let n = 0; n < o.maxTokens; n++) {
       if (o.signal?.aborted) break;
-      const logits = await m.logits();
-      const id = sample(logits, this.history.slice(-64).filter((t) => typeof t === 'number'), o);
+      const id = sampleCandidates(await m.candidates(), this.history.slice(-64).filter((t) => typeof t === 'number'), o);
       if (id === this.tokenizer.eos || this.tokenizer.tokens[id] === '<|im_end|>') break;
       out.push(id);
       const piece = this.tokenizer.decode(out).slice(text.length);
@@ -154,7 +153,33 @@ export class Keptsam {
   stats() { return this.gpu.report(); }
 }
 
-/** Repeat penalty, temperature, top-k, top-p. temperature 0 = greedy. */
+/**
+ * Samples from GPU top candidates ({ values, ids }): repeat penalty, temperature, top-k, top-p; temperature 0 = greedy.
+ * The penalty only lowers scores, so the penalized top-k is still among the candidates.
+ */
+export function sampleCandidates({ values, ids }, recent, o) {
+  const rec = new Set(recent);
+  const pen = o.repeatPenalty && o.repeatPenalty !== 1 ? o.repeatPenalty : 0;
+  const order = [...values.keys()].filter((i) => values[i] > -1e38);
+  const score = (i) => (pen && rec.has(ids[i]) ? (values[i] > 0 ? values[i] / pen : values[i] * pen) : values[i]);
+  const sc = new Float32Array(values.length);
+  for (const i of order) sc[i] = score(i);
+  order.sort((a, b) => sc[b] - sc[a]);
+  if (!o.temperature) return ids[order[0]];
+  const k = Math.min(o.topK || order.length, order.length);
+  const top = order.slice(0, k);
+  const mx = sc[top[0]];
+  let p = top.map((i) => Math.exp((sc[i] - mx) / o.temperature));
+  const sum = p.reduce((a, b) => a + b, 0);
+  p = p.map((x) => x / sum);
+  let cut = top.length, acc = 0;
+  if (o.topP < 1) for (let i = 0; i < p.length; i++) { acc += p[i]; if (acc >= o.topP) { cut = i + 1; break; } }
+  let r = Math.random() * p.slice(0, cut).reduce((a, b) => a + b, 0);
+  for (let i = 0; i < cut; i++) { r -= p[i]; if (r <= 0) return ids[top[i]]; }
+  return ids[top[cut - 1]];
+}
+
+/** Repeat penalty, temperature, top-k, top-p over full logits. temperature 0 = greedy. */
 export function sample(logits, recent, { temperature, topK, topP, repeatPenalty }) {
   const l = logits;
   if (repeatPenalty && repeatPenalty !== 1) {

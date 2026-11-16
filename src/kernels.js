@@ -523,3 +523,151 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     Y[t * 4u * p.C + k] = X[(py * p.pw + px) * p.C + c];
   }
 }`;
+
+/**
+ * Tiled Y[t, r] = W[r, :] · X[t, :] for a Q4_0 weight and many tokens (prompt reading).
+ * Each workgroup computes 64 rows × 32 tokens through shared memory, so each weight block is read and
+ * dequantized once per 32 tokens; each thread accumulates 4 rows × 2 tokens.
+ * Same parameters as matmulQ4_0.
+ */
+export const gemmQ4_0 = /* wgsl */ `
+struct P { rows: u32, K: u32, T: u32, dOff: u32, yStride: u32, yOff: u32, xStride: u32, accumulate: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<u32>;
+@group(0) @binding(2) var<storage, read> X: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+var<workgroup> Ws: array<f32, 2048>; // [32 k][64 rows]
+var<workgroup> Xs: array<f32, 1024>; // [32 k][32 tokens]
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let row0 = wid.x * 64u;
+  let tok0 = wid.y * 32u;
+  let nb = p.K / 32u;
+  let tr = li / 16u; let tc = li % 16u;
+  var acc: array<f32, 8>;
+  // loader roles
+  let lr = li / 4u; let lq = li % 4u;
+  let lrow = row0 + lr;
+  for (var b = 0u; b < nb; b++) {
+    // 64 rows × 1 block: each thread dequantizes one word (8 values) of one row's block.
+    if (lrow < p.rows) {
+      let blk = lrow * nb + b;
+      let dw = W[p.dOff + (blk >> 1u)];
+      let d = select(unpack2x16float(dw).x, unpack2x16float(dw).y, (blk & 1u) == 1u);
+      let q = W[blk * 4u + lq];
+      for (var j = 0u; j < 4u; j++) {
+        let byte = (q >> (j * 8u)) & 0xffu;
+        let k = lq * 4u + j;
+        Ws[k * 64u + lr] = (f32(byte & 15u) - 8.0) * d;
+        Ws[(k + 16u) * 64u + lr] = (f32(byte >> 4u) - 8.0) * d;
+      }
+    } else {
+      for (var j = 0u; j < 4u; j++) { Ws[(lq * 4u + j) * 64u + lr] = 0.0; Ws[(lq * 4u + j + 16u) * 64u + lr] = 0.0; }
+    }
+    // 32 tokens × 32 values of X.
+    for (var m = 0u; m < 4u; m++) {
+      let idx = li + 256u * m;
+      let t = idx / 32u; let k = idx % 32u;
+      let tok = tok0 + t;
+      Xs[k * 32u + t] = select(0.0, X[tok * p.xStride + b * 32u + k], tok < p.T);
+    }
+    workgroupBarrier();
+    for (var k = 0u; k < 32u; k++) {
+      let x0 = Xs[k * 32u + tc]; let x1 = Xs[k * 32u + tc + 16u];
+      for (var i = 0u; i < 4u; i++) {
+        let w = Ws[k * 64u + tr + 16u * i];
+        acc[i * 2u] += w * x0;
+        acc[i * 2u + 1u] += w * x1;
+      }
+    }
+    workgroupBarrier();
+  }
+  for (var i = 0u; i < 4u; i++) {
+    let row = row0 + tr + 16u * i;
+    if (row < p.rows) {
+      for (var j = 0u; j < 2u; j++) {
+        let tok = tok0 + tc + 16u * j;
+        if (tok < p.T) { Y[tok * p.yStride + p.yOff + row] = acc[i * 2u + j]; }
+      }
+    }
+  }
+}`;
+
+/**
+ * Top 16 of each 256-value slice of the logits: C[(slice·16 + i)·2] = value bits, C[… + 1] = token id.
+ * Reading back these candidates (8 KB per 1,000 slices) replaces reading back every logit; the true top-k is in
+ * them unless more than 16 of it share one slice of 256 neighbouring token ids.
+ */
+export const topk16 = /* wgsl */ `
+struct P { n: u32, pad0: u32, pad1: u32, pad2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> L: array<f32>;
+@group(0) @binding(2) var<storage, read_write> C: array<u32>;
+var<workgroup> v: array<f32, 256>;
+var<workgroup> rv: array<f32, 256>;
+var<workgroup> ri: array<u32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let i = wid.x * 256u + lid.x;
+  v[lid.x] = select(-3.0e38, L[i], i < p.n);
+  workgroupBarrier();
+  for (var r = 0u; r < 16u; r++) {
+    rv[lid.x] = v[lid.x]; ri[lid.x] = lid.x;
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+      if (lid.x < s && rv[lid.x + s] > rv[lid.x]) { rv[lid.x] = rv[lid.x + s]; ri[lid.x] = ri[lid.x + s]; }
+      workgroupBarrier();
+    }
+    let best = ri[0];
+    if (lid.x == 0u) {
+      C[(wid.x * 16u + r) * 2u] = bitcast<u32>(rv[0]);
+      C[(wid.x * 16u + r) * 2u + 1u] = wid.x * 256u + best;
+    }
+    if (lid.x == best) { v[lid.x] = -3.0e38; }
+    workgroupBarrier();
+  }
+}`;
+
+/**
+ * Single-token y = W·x for Q4_0: 8 rows per 256-thread workgroup (32 threads per row, striding over blocks),
+ * so far fewer, fuller workgroups than one per row. Same parameters as matmulQ4_0 (T must be 1).
+ */
+export const matvecQ4_0 = /* wgsl */ `
+struct P { rows: u32, K: u32, T: u32, dOff: u32, yStride: u32, yOff: u32, xStride: u32, accumulate: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<u32>;
+@group(0) @binding(2) var<storage, read> X: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+var<workgroup> red: array<f32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let g = li / 32u; let lane = li % 32u;
+  let row = (wid.y * 4096u + wid.x) * 8u + g;
+  let nb = p.K / 32u;
+  var acc = 0.0;
+  if (row < p.rows) {
+    for (var b = lane; b < nb; b += 32u) {
+      let blk = row * nb + b;
+      let dw = W[p.dOff + (blk >> 1u)];
+      let d = select(unpack2x16float(dw).x, unpack2x16float(dw).y, (blk & 1u) == 1u);
+      let xb = b * 32u;
+      var s = 0.0;
+      for (var w = 0u; w < 4u; w++) {
+        let q = W[blk * 4u + w];
+        for (var j = 0u; j < 4u; j++) {
+          let byte = (q >> (j * 8u)) & 0xffu;
+          let k = xb + w * 4u + j;
+          s += (f32(byte & 15u) - 8.0) * X[k] + (f32(byte >> 4u) - 8.0) * X[k + 16u];
+        }
+      }
+      acc += s * d;
+    }
+  }
+  red[li] = acc;
+  workgroupBarrier();
+  for (var s = 16u; s > 0u; s >>= 1u) {
+    if (lane < s) { red[li] += red[li + s]; }
+    workgroupBarrier();
+  }
+  if (lane == 0u && row < p.rows) { Y[p.yOff + row] = red[li]; }
+}`;
