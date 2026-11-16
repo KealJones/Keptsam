@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Keptsam</title>
+<style>
+  :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+  body { margin: 0; padding: max(12px, env(safe-area-inset-top)) 14px 14px; max-width: 760px; margin-inline: auto; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .tag { color: GrayText; font-size: 13px; margin: 0 0 12px; }
+  input, textarea, button, select { font: inherit; font-size: 16px; }
+  input, textarea, select { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid #8886; }
+  button { padding: 8px 14px; border-radius: 8px; border: 1px solid #8888; background: none; }
+  .row { display: flex; gap: 8px; margin: 8px 0; align-items: center; }
+  .row > :first-child { flex: 1; }
+  #bar { height: 6px; background: #8883; border-radius: 3px; overflow: hidden; margin: 6px 0; }
+  #bar > div { height: 100%; width: 0; background: #2a78d6; }
+  #out { white-space: pre-wrap; border: 1px solid #8886; border-radius: 8px; padding: 10px; min-height: 120px; margin-top: 8px; }
+  .think { color: GrayText; }
+  #stats { font: 12px ui-monospace, monospace; color: GrayText; white-space: pre-wrap; margin-top: 8px; }
+</style>
+<h1>Keptsam</h1>
+<p class="tag">The model iOS didn't throw overboard. LFM3 on WebGPU, streamed straight into GPU memory.</p>
+
+<div class="row">
+  <select id="model">
+    <option value="https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf">LFM3 1.7B QAD Q4_0 (1.05 GB)</option>
+  </select>
+  <button id="load">Load</button>
+</div>
+<div class="row"><label style="flex:0">Context</label><input id="ctx" type="number" value="4096" step="1024" min="1024" style="width:110px;flex:0"></div>
+<div id="bar"><div></div></div>
+<div class="row"><textarea id="prompt" rows="3" placeholder="Say something">What's the capital of France? One sentence.</textarea></div>
+<div class="row"><label style="flex:0;white-space:nowrap"><input id="thinking" type="checkbox" checked style="width:auto"> thinking</label><span></span><button id="send" disabled>Send</button></div>
+<div id="out"></div>
+<div id="stats"></div>
+
+<script type="module">
+import { Keptsam } from '../src/index.js';
+
+const $ = (id) => document.getElementById(id);
+const stats = (extra = '') => { $('stats').textContent = (llm ? JSON.stringify(llm.stats(), null, 1) : '') + extra; };
+let llm = null;
+const messages = [];
+
+$('load').onclick = async () => {
+  $('load').disabled = true;
+  const t0 = performance.now();
+  try {
+    llm = await Keptsam.load($('model').value, {
+      ctx: Number($('ctx').value),
+      onProgress: ({ loaded, total }) => { $('bar').firstChild.style.width = (100 * loaded / total).toFixed(1) + '%'; $('stats').textContent = `loading ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`; },
+    });
+    stats(`\nloaded in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+    $('send').disabled = false;
+  } catch (e) {
+    $('stats').textContent = 'Load failed: ' + (e.stack || e);
+    $('load').disabled = false;
+  }
+};
+
+$('send').onclick = async () => {
+  const text = $('prompt').value.trim();
+  if (!text) return;
+  $('send').disabled = true;
+  messages.push({ role: 'user', content: text });
+  const out = $('out');
+  out.textContent = '';
+  let n = 0, t0 = 0, tFirst = 0;
+  const tStart = performance.now();
+  try {
+    const reply = await llm.chat(messages, {
+      thinking: $('thinking').checked,
+      onToken: (piece) => {
+        if (!n) { tFirst = performance.now(); t0 = tFirst; }
+        n++;
+        out.textContent += piece;
+        if (n % 4 === 0) stats(`\nfirst token ${((tFirst - tStart) / 1000).toFixed(2)} s, ${(n / ((performance.now() - t0) / 1000)).toFixed(1)} tok/s`);
+      },
+    });
+    messages.push({ role: 'assistant', content: reply });
+    stats(`\nfirst token ${((tFirst - tStart) / 1000).toFixed(2)} s, ${n} tokens, ${(n / ((performance.now() - t0) / 1000)).toFixed(1)} tok/s`);
+  } catch (e) {
+    out.textContent += '\n[error] ' + (e.stack || e);
+  }
+  $('send').disabled = false;
+};
+</script>
