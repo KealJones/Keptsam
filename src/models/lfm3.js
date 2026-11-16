@@ -53,7 +53,8 @@ export class LFM3 {
      * starts with small submits instead of finding out the hard way (WebKit kills the GPU at ~3 s).
      */
     this.submitBudgetMs = 1000;
-    this.msPerLayerToken = 20;
+    /** Estimates by batch size (rounded up to a power of 2): cost per token is not flat in the batch size. */
+    this.est = new Map();
   }
 
   async #stream(src, onProgress) {
@@ -129,7 +130,11 @@ export class LFM3 {
     const E = this.nEmbd, a = this.a, gpu = this.gpu, pos0 = this.pos;
     if (T > this.chunk) throw new Error(`forward takes at most ${this.chunk} tokens`);
     if (pos0 + T > this.ctx) throw new Error('context is full');
-    const per = Math.max(1, Math.min(this.nLayer, Math.floor(this.submitBudgetMs / (this.msPerLayerToken * T))));
+    const bucket = 2 ** Math.ceil(Math.log2(T));
+    // Unknown batch size: borrow the worst estimate from a smaller one, else start pessimistic.
+    let est = this.est.get(bucket);
+    if (est === undefined) est = Math.max(20, ...[...this.est].filter(([b]) => b < bucket).map(([, v]) => v));
+    const per = Math.max(1, Math.min(this.nLayer, Math.floor(this.submitBudgetMs / (est * T))));
     let enc = gpu.device.createCommandEncoder();
     if (tokens) {
       gpu.device.queue.writeBuffer(a.tok, 0, new Uint32Array(tokens));
@@ -140,8 +145,9 @@ export class LFM3 {
     let inEnc = 0;
     const learn = (ms, layers) => {
       // Follow slowdowns at once, speedups slowly (thermal throttling only goes one way at a time).
-      const est = ms / (layers * T);
-      this.msPerLayerToken = est > this.msPerLayerToken ? est : 0.8 * this.msPerLayerToken + 0.2 * est;
+      const e = ms / (layers * T);
+      est = e > est ? e : 0.8 * est + 0.2 * e;
+      this.est.set(bucket, est);
     };
     for (let i = 0; i < this.nLayer; i++) {
       this.#layer(enc, i, T, pos0);
@@ -159,8 +165,9 @@ export class LFM3 {
     const ms = await this.#submit(enc);
     if (T > 1 && inEnc) learn(ms, inEnc);
     // Even one layer per submit would be over budget: read fewer tokens at a time (and more again when it's fast).
-    if (this.msPerLayerToken * this.chunk > this.submitBudgetMs && this.chunk > 8) this.chunk >>= 1;
-    else if (this.msPerLayerToken * this.chunk * 2 < this.submitBudgetMs / 2 && this.chunk * 2 <= this.maxChunk) this.chunk *= 2;
+    const big = this.est.get(2 ** Math.ceil(Math.log2(this.chunk)));
+    if (big !== undefined && big * this.chunk > this.submitBudgetMs && this.chunk > 8) this.chunk >>= 1;
+    else if (big !== undefined && big * this.chunk * 2 < this.submitBudgetMs / 2 && this.chunk * 2 <= this.maxChunk) this.chunk *= 2;
     this.pos += T;
   }
 

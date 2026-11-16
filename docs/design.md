@@ -91,3 +91,22 @@ iPhone at ~80% loaded.
 - `npm run gpu-test`: kernels in headless Chrome on SwiftShader WebGPU, compared to the CPU reference and to
   llama.cpp's logits for the same prompt.
 - Real devices: the phone relay (KealJones/phone-relay) drives iPhone Safari for load, memory and speed runs.
+
+## Measured on an iPhone 16 (Safari 27, Nov 16, 2026)
+
+| | LFM3 1.7B QAD Q4_0 | LFM3 Omni 2B Q4_0 + vision |
+|---|---|---|
+| Memory counted by the engine | 1,123 MB (ctx 4096) | 1,067 MB (ctx 2048); 1,280 MB peak while the vision encoder is swapped in |
+| Load from Cache Storage | ~5 s | ~5 s (+0.4 s vision encoder) |
+| Decode | 8 tok/s (56 ms GPU per token; the rest is CPU-side overhead) | 7 tok/s |
+| Prompt reading | ~3–6 tok/s (naive batched matmul) | 64 image tokens in ~25 s |
+| Vision encode, 256×256 image | – | ~1 s GPU, largest submit 442 ms |
+| Correctness | answers correctly | 256×256 test image: first 8 greedy tokens identical to llama.cpp |
+
+Lessons:
+- 6 layers × 64 tokens in one submit (~4.5 s) made Safari drop the GPU. Submits are now sized ahead of time from
+  per-batch-size estimates; cost per token is not flat in batch size (≈3.5 ms per layer-token at 8 tokens,
+  ≈11.7 ms at 64), so one estimate per batch size.
+- GitHub Pages lets Safari cache modules for 10 minutes: after a deploy, a reload can still run old code.
+
+Next: a tiled matmul for prompt reading (the biggest gap), and moving sampling to the GPU (decode overhead).
