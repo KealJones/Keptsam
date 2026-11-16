@@ -1,0 +1,91 @@
+# Keptsam design
+
+Keptsam runs small language models in a browser tab on WebGPU, built to survive iPhone Safari. iOS kills a tab
+that uses too much memory (Jetsam) or keeps the GPU busy too long; Keptsam is built around both limits instead of
+hoping to stay under them.
+
+First model: **LFM3 1.7B** (Liquid AI). Next: **LFM3 Omni 2B**, with vision, hearing and speech swapped in and out
+around a resident backbone.
+
+## The limits we design for
+
+| Limit | Where it bites | Measured on |
+|---|---|---|
+| ~1.9 GB per tab, shared by JS heap, WebAssembly and GPU buffers | loading weights, KV cache, activations | iPhone 16, Safari 27 (Nov 2026) |
+| ~3 s per GPU command buffer, then WebKit kills the GPU process | long prefill, big matmuls | iPhone, Safari 27 |
+| no `shader-f16` guaranteed (SwiftShader, some Android) | kernels | test bench |
+
+The iPhone page and an iframe share the same 1.9 GB (tested with a cross-site iframe), so splitting work across
+frames does not buy memory.
+
+## Principles
+
+1. **Never hold a whole file.** Weights arrive by HTTP range request, tensor by tensor, are repacked into the GPU
+   layout in a small reused staging buffer, written to the GPU and dropped. Peak memory during load is the GPU
+   weights so far plus one staging buffer, not the file twice.
+2. **Account for every byte.** Every GPU buffer is allocated through one place that keeps a running total, so the
+   engine can report what it holds and refuse a load that would not fit.
+3. **Short GPU submits, sized by measurement.** Work is split into command buffers that each stay well under the
+   3 s limit. The engine times each submit and splits finer when one runs long, instead of hard-coding Safari's
+   number, because other browsers and drivers have their own undocumented limits.
+4. **Only what's needed is resident.** For multimodal models the backbone stays loaded; each sense (vision encoder,
+   audio encoder, speech generator) is loaded when needed and freed after.
+5. **GPU only.** No CPU fallback: a 1.7B model on a phone CPU takes minutes to answer "hi".
+6. **No build step.** Plain ES modules with JSDoc types, served as-is (GitHub Pages works). Model-specific code
+   lives in one file per architecture so other models can be added.
+
+## Model input
+
+Official GGUF files, read directly. No conversion step, no extra hosting: Liquid publishes GGUFs for every LFM3
+model, and the Omni encoders come as a separate `mmproj` GGUF.
+
+`LFM3-1.7B-QAD-Q4_0.gguf` (1,050 MB, quantization-aware distilled):
+
+| Tensors | Format |
+|---|---|
+| every matmul weight in the 24 layers | Q4_0 (32 values per block: f16 scale + 16 bytes of 4-bit values) |
+| `token_embd` (128,000 × 2,048), also the output head | Q6_K (256 values per 210-byte block) |
+| norms, conv kernels, `rope_freqs` | F32 |
+
+GGUF blocks are 18 and 210 bytes, not 4-byte aligned, so the loader repacks them on the way in:
+Q4_0 becomes a `u32` array of nibbles plus a `u32` array of f16 scale pairs; Q6_K is padded to 212 bytes per block.
+Kernels read `u32` and use `unpack2x16float`, so `shader-f16` is optional.
+
+## LFM3 backbone (from the GGUF metadata and llama.cpp's `lfm3.cpp`)
+
+- 24 layers, hidden 2,048, FFN 7,680 (SwiGLU), vocab 128,000, RMSNorm eps 1e-5.
+- Every layer: `x += post_norm(mixer(norm(x)))`, then `x += post_ffw_norm(ffn(ffn_norm(x)))` (sandwich norms).
+- 13 **short-conv** layers (0, 1, 3, 5, …, 23): `in_proj` → B, C, X (2,048 each); `y = C ⊙ conv7(B ⊙ X)` (causal,
+  depthwise, width 7, keeps the last 6 inputs as state); `out_proj`.
+- 11 **attention** layers (2, 4, …, 22): 16 query heads, 4 KV heads, head dim 128, RMSNorm on q and k per head,
+  NeoX RoPE, scale 1/√128, then a per-head **output gate** `sigmoid(W_gate x)` multiplied into each head's output,
+  then `attn_output`.
+  - 5 of them (4, 8, 12, 16, 20) are **sliding window** (256 tokens), RoPE base 10,000.
+  - 6 are **global**, RoPE base 1,000,000 with `rope_freqs` factors (θ is divided by the factor).
+- KV cache: only the 6 global layers grow with context (6 × 2 × 4 × 128 values per token, ~12 KB/token in f16:
+  ~75 MB at 6K). The sliding-window layers keep a 256-token ring.
+- Output: final RMSNorm, then the tied `token_embd` as the head.
+
+## Memory plan (weights only)
+
+| Piece | MB |
+|---|---|
+| LFM3 1.7B QAD Q4_0 layers | ~835 |
+| token table / head (Q6_K) | ~215 |
+| KV cache at 6K (f16) | ~75 |
+
+Later savings, measured before adopting: English-only vocab trim (~160 MB off the table), f16 KV vs f32.
+
+## Omni later
+
+`LFM3-Omni-2B` = the same backbone + `mmproj`: vision encoder + connector (~203 MB at Q8), audio encoder +
+connector (~123 MB), speech generator `a.gen` (~181 MB). Peak with swapping is the backbone plus the largest single
+sense (~1.3 GB of weights), instead of everything at once (~1.6 GB), which crashed Liquid's own WebGPU Space on an
+iPhone at ~80% loaded.
+
+## Testing
+
+- `node --test`: GGUF parsing, repacking and CPU reference math.
+- `npm run gpu-test`: kernels in headless Chrome on SwiftShader WebGPU, compared to the CPU reference and to
+  llama.cpp's logits for the same prompt.
+- Real devices: the phone relay (KealJones/phone-relay) drives iPhone Safari for load, memory and speed runs.
