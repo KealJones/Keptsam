@@ -7,25 +7,35 @@ import { openGpu } from './gpu.js';
 import { httpSource } from './gguf.js';
 import { Tokenizer } from './tokenizer.js';
 import { cachedSource, clearCache } from './cache.js';
+import { readGGUF } from './gguf.js';
 import { LFM3 } from './models/lfm3.js';
+import { LFM3Vision } from './models/lfm3vl.js';
+import { patchify } from './image.js';
 
-export { openGpu, httpSource, Tokenizer, LFM3, cachedSource, clearCache };
-
-const MODELS = { lfm3: LFM3 };
+export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, cachedSource, clearCache, patchify };
 
 export class Keptsam {
   /**
    * Loads a GGUF model onto the GPU, streaming it in.
    * @param {string | import('./gguf.js').ByteSource} source URL or byte source
-   * @param {{ ctx?: number, chunk?: number, cache?: boolean, gpu?: import('./gpu.js').Gpu, onProgress?: Function }} [opts]
-   *   `cache` (default true for URLs) keeps the file in the browser's Cache Storage so it downloads once.
+   * @param {{ ctx?: number, chunk?: number, cache?: boolean, gpu?: import('./gpu.js').Gpu, onProgress?: Function,
+   *   mmproj?: string, imageMaxPixels?: number, keepEncoders?: boolean }} [opts]
+   *   `cache` (default true for URLs) keeps files in the browser's Cache Storage so they download once.
+   *   `mmproj` (Omni/VL models) is the encoder file; encoders load only when an image arrives and are freed after
+   *   unless `keepEncoders`. `imageMaxPixels` caps image size (default 512·512, at most 256 image tokens).
    */
-  static async load(source, { ctx = 4096, chunk = 64, cache = true, gpu, onProgress } = {}) {
+  static async load(source, { ctx = 4096, chunk = 64, cache = true, gpu, onProgress, mmproj, imageMaxPixels = 512 * 512, keepEncoders = false } = {}) {
     gpu ||= await openGpu();
-    let src = typeof source === 'string' ? httpSource(source) : source;
-    if (typeof source === 'string' && cache) src = await cachedSource(src, { key: source });
-    const model = await LFM3.load(gpu, src, { ctx, chunk, onProgress });
-    return new Keptsam(gpu, model);
+    const open = async (s) => (typeof s === 'string' && cache ? cachedSource(httpSource(s), { key: s }) : typeof s === 'string' ? httpSource(s) : s);
+    const model = await LFM3.load(gpu, await open(source), { ctx, chunk, onProgress });
+    const k = new Keptsam(gpu, model);
+    if (mmproj) {
+      const src = await open(mmproj);
+      k.encoders = { src, gguf: await readGGUF(src) };
+    }
+    k.imageMaxPixels = imageMaxPixels;
+    k.keepEncoders = keepEncoders;
+    return k;
   }
 
   constructor(gpu, model) {
@@ -44,22 +54,31 @@ export class Keptsam {
 
   /**
    * Formats messages with the model's chat format (system/user/assistant; tools are left to the caller).
-   * @param {{ role: string, content: string }[]} messages
+   * Content is a string, or an array of parts: strings, { type: 'text', text }, { type: 'image', image }.
+   * Returns a string, or (when there are images) an array of strings and { image } parts.
+   * @param {{ role: string, content: string | any[] }[]} messages
    */
   formatChat(messages, { thinking = true } = {}) {
-    const t = this.tokenizer.tokens;
-    let s = t[this.tokenizer.bos];
+    const parts = [this.tokenizer.tokens[this.tokenizer.bos]];
+    const push = (x) => { if (typeof x === 'string' && typeof parts.at(-1) === 'string') parts[parts.length - 1] += x; else parts.push(x); };
+    const content = (c) => {
+      if (!Array.isArray(c)) return push(String(c ?? ''));
+      for (const p of c) {
+        if (typeof p === 'string') push(p);
+        else if (p.type === 'image') { push('<|vision_start|>'); push({ image: p.image }); push('<|vision_end|>'); }
+        else push(String(p.text ?? ''));
+      }
+    };
     let lastUser = -1;
     messages.forEach((m, i) => { if (m.role === 'user') lastUser = i; });
     messages.forEach((m, i) => {
-      if (m.role === 'assistant') {
-        const body = i > lastUser ? m.content : '<think></think>' + String(m.content).split('</think>').pop().trim();
-        s += `<|im_start|>assistant\n${body}<|im_end|>\n`;
-      } else {
-        s += `<|im_start|>${m.role}\n${m.content}<|im_end|>\n`;
-      }
+      push(`<|im_start|>${m.role}\n`);
+      if (m.role === 'assistant' && i < lastUser) push('<think></think>' + String(m.content).split('</think>').pop().trim());
+      else content(m.content);
+      push('<|im_end|>\n');
     });
-    return s + '<|im_start|>assistant\n' + (thinking ? '<think>' : '<think></think>');
+    push('<|im_start|>assistant\n' + (thinking ? '<think>' : '<think></think>'));
+    return parts.length === 1 ? parts[0] : parts;
   }
 
   /** Chat completion: formats, generates, returns the reply text. */
@@ -68,31 +87,39 @@ export class Keptsam {
   }
 
   /**
-   * Generates text after `prompt` (a string, or token ids). If the prompt starts with everything the model has
-   * already read, only the new part is read; otherwise the model starts over.
-   * @param {string | number[]} prompt
+   * Generates text after `prompt`: a string, token ids, or an array of strings and { image } parts.
+   * If the prompt starts with everything the model has already read (same tokens, same image objects),
+   * only the new part is read; otherwise the model starts over.
+   * @param {string | number[] | (string | { image: any })[]} prompt
    * @param {{ maxTokens?: number, temperature?: number, topK?: number, topP?: number, repeatPenalty?: number,
-   *   stop?: string[], onToken?: (text: string, id: number) => void, signal?: AbortSignal }} [opts]
+   *   stop?: string[], onToken?: (text: string, id: number) => void, onStatus?: (s: string) => void, signal?: AbortSignal }} [opts]
    */
   async generate(prompt, opts = {}) {
     const o = { maxTokens: 512, topP: 1, stop: [], ...this.defaults, ...opts };
-    const ids = typeof prompt === 'string' ? this.tokenizer.encode(prompt) : prompt;
+    // Items: token ids, or image parts (one item each, compared by identity).
+    const items = typeof prompt === 'string' ? this.tokenizer.encode(prompt)
+      : prompt.flatMap((p) => (typeof p === 'number' ? [p] : typeof p === 'string' ? this.tokenizer.encode(p) : [p]));
     const m = this.model;
-    const reuse = this.history.length <= ids.length && this.history.every((t, i) => t === ids[i]) && this.history.length < ids.length;
+    const h = this.history;
+    const reuse = h.length < items.length && h.every((t, i) => t === items[i]);
     if (!reuse) { m.reset(); this.history = []; }
-    const fresh = ids.slice(this.history.length);
-    for (let i = 0; i < fresh.length; i += m.chunk) {
+    const fresh = items.slice(this.history.length);
+    for (let i = 0; i < fresh.length;) {
       if (o.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      await m.forward(fresh.slice(i, i + m.chunk));
+      if (typeof fresh[i] !== 'number') { await this.#readImage(fresh[i].image, o); i++; continue; }
+      let j = i;
+      while (j < fresh.length && j - i < m.chunk && typeof fresh[j] === 'number') j++;
+      await m.forward(fresh.slice(i, j));
+      i = j;
     }
-    this.history = [...ids];
+    this.history = [...items];
 
     const out = [];
     let text = '';
     for (let n = 0; n < o.maxTokens; n++) {
       if (o.signal?.aborted) break;
       const logits = await m.logits();
-      const id = sample(logits, [...this.history.slice(-64)], o);
+      const id = sample(logits, this.history.slice(-64).filter((t) => typeof t === 'number'), o);
       if (id === this.tokenizer.eos || this.tokenizer.tokens[id] === '<|im_end|>') break;
       out.push(id);
       const piece = this.tokenizer.decode(out).slice(text.length);
@@ -104,6 +131,23 @@ export class Keptsam {
       this.history.push(id);
     }
     return text;
+  }
+
+  /** Encodes an image (loading the vision encoder if needed) and feeds its embeddings to the model. */
+  async #readImage(image, o) {
+    if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot read images.');
+    if (!this.vision) {
+      o.onStatus?.('loading vision encoder');
+      this.vision = await LFM3Vision.load(this.gpu, this.encoders.src, this.encoders.gguf);
+    }
+    o.onStatus?.('reading image');
+    const pt = patchify(image, { ...this.vision.cfg, maxPixels: Math.min(this.vision.cfg.maxPixels, this.imageMaxPixels) });
+    const { buf, tokens } = await this.vision.encode(pt);
+    if (!this.keepEncoders) { this.vision.free(); this.vision = null; }
+    try {
+      for (let i = 0; i < tokens; i += this.model.chunk) await this.model.forwardEmbeds(buf, i, Math.min(this.model.chunk, tokens - i));
+    } finally { this.gpu.free(buf); }
+    o.onStatus?.(`read image (${tokens} tokens)`);
   }
 
   /** Memory and timing report. */

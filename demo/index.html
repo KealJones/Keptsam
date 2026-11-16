@@ -25,13 +25,15 @@
 <div class="row">
   <select id="model">
     <option value="https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf">LFM3 1.7B QAD Q4_0 (1.05 GB)</option>
+    <option value="https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/LFM3-Omni-2B-Q4_0.gguf" data-mmproj="https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/mmproj-LFM3-Omni-2B-Q8_0.gguf">LFM3 Omni 2B Q4_0 + vision (1.05 GB + 0.2 GB per photo)</option>
   </select>
   <button id="load">Load</button>
 </div>
 <div class="row"><label style="flex:0">Context</label><input id="ctx" type="number" value="4096" step="1024" min="1024" style="width:110px;flex:0"></div>
 <div id="bar"><div></div></div>
 <div class="row"><textarea id="prompt" rows="3" placeholder="Say something">What's the capital of France? One sentence.</textarea></div>
-<div class="row"><label style="flex:0;white-space:nowrap"><input id="thinking" type="checkbox" checked style="width:auto"> thinking</label><span></span><button id="send" disabled>Send</button></div>
+<div class="row" id="photoRow" hidden><label style="flex:0;white-space:nowrap"><input id="photo" type="file" accept="image/*" style="width:auto"></label><img id="thumb" alt="" style="max-height:56px;border-radius:6px;flex:0" hidden></div>
+<div class="row"><label style="flex:0;white-space:nowrap"><input id="thinking" type="checkbox" checked style="width:auto"> thinking</label><span id="status" class="tag" style="margin:0"></span><button id="send" disabled>Send</button></div>
 <div id="out"></div>
 <div id="stats"></div>
 
@@ -64,23 +66,35 @@ $('load').onclick = async () => {
   $('load').disabled = true;
   const t0 = performance.now();
   try {
-    llm = await Keptsam.load($('model').value, {
+    const opt = $('model').selectedOptions[0];
+    llm = await Keptsam.load(opt.value, {
       ctx: Number($('ctx').value),
+      mmproj: opt.dataset.mmproj,
       onProgress: ({ loaded, total }) => { $('bar').firstChild.style.width = (100 * loaded / total).toFixed(1) + '%'; $('stats').textContent = `loading ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`; },
     });
     stats(`\nloaded in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     $('send').disabled = false;
+    $('photoRow').hidden = !opt.dataset.mmproj;
   } catch (e) {
     $('stats').textContent = 'Load failed: ' + (e.stack || e);
     $('load').disabled = false;
   }
 };
 
+let photo = null;
+$('photo').onchange = async () => {
+  const f = $('photo').files[0];
+  photo = f ? await createImageBitmap(f) : null;
+  $('thumb').hidden = !f;
+  if (f) $('thumb').src = URL.createObjectURL(f);
+};
+
 $('send').onclick = async () => {
   const text = $('prompt').value.trim();
   if (!text) return;
   $('send').disabled = true;
-  messages.push({ role: 'user', content: text });
+  messages.push({ role: 'user', content: photo ? [{ type: 'image', image: photo }, text] : text });
+  photo = null; $('photo').value = ''; $('thumb').hidden = true;
   const out = $('out');
   out.textContent = '';
   let n = 0, t0 = 0, tFirst = 0;
@@ -88,6 +102,7 @@ $('send').onclick = async () => {
   try {
     const reply = await llm.chat(messages, {
       thinking: $('thinking').checked,
+      onStatus: (st) => { $('status').textContent = st; stats(`\n${st} at ${((performance.now() - tStart) / 1000).toFixed(1)} s`); },
       onToken: (piece) => {
         if (!n) { tFirst = performance.now(); t0 = tFirst; }
         n++;
