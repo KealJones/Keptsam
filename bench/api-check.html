@@ -15,7 +15,7 @@ try {
   log('load (network)', ((performance.now() - t0) / 1000).toFixed(1), 's', JSON.stringify(llm.stats()));
   t0 = performance.now();
   const text = await llm.generate('The capital of France is', { temperature: 0, repeatPenalty: 1, maxTokens: 3 });
-  log('generated', JSON.stringify(text), ((performance.now() - t0) / 1000).toFixed(1), 's', 'layers/submit now', llm.model.layersPerSubmit);
+  log('generated', JSON.stringify(text), ((performance.now() - t0) / 1000).toFixed(1), 's', 'ms per layer-token', llm.model.msPerLayerToken.toFixed(2));
   for (const b of Object.values(llm.model.w)) llm.gpu.free(b.buf);
   t0 = performance.now();
   llm = await Keptsam.load(url, { ctx: 256, chunk: 8, gpu: llm.gpu });

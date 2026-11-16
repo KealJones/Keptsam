@@ -28,6 +28,7 @@ export class LFM3 {
     this.gguf = g;
     this.ctx = ctx;
     this.chunk = chunk;
+    this.maxChunk = chunk;
     this.nLayer = archKey(g, 'block_count');
     this.nEmbd = archKey(g, 'embedding_length');
     this.nFF = archKey(g, 'feed_forward_length');
@@ -46,9 +47,13 @@ export class LFM3 {
     this.vocab = this.tokenizer.tokens.length;
     this.w = {};
     this.pos = 0;
-    /** Prefill layers per GPU submit; halves when a submit runs over budget. */
-    this.layersPerSubmit = 6;
+    /**
+     * Each submit is sized ahead of time to stay under `submitBudgetMs`, from a running estimate of GPU ms per
+     * layer per token. The estimate starts pessimistic and follows the slowest recent submit, so a cold device
+     * starts with small submits instead of finding out the hard way (WebKit kills the GPU at ~3 s).
+     */
     this.submitBudgetMs = 1000;
+    this.msPerLayerToken = 20;
   }
 
   async #stream(src, onProgress) {
@@ -124,7 +129,7 @@ export class LFM3 {
     const E = this.nEmbd, a = this.a, gpu = this.gpu, pos0 = this.pos;
     if (T > this.chunk) throw new Error(`forward takes at most ${this.chunk} tokens`);
     if (pos0 + T > this.ctx) throw new Error('context is full');
-    const per = T === 1 ? this.nLayer : this.layersPerSubmit;
+    const per = Math.max(1, Math.min(this.nLayer, Math.floor(this.submitBudgetMs / (this.msPerLayerToken * T))));
     let enc = gpu.device.createCommandEncoder();
     if (tokens) {
       gpu.device.queue.writeBuffer(a.tok, 0, new Uint32Array(tokens));
@@ -132,20 +137,30 @@ export class LFM3 {
     } else {
       enc.copyBufferToBuffer(embeds.buf, embeds.row0 * E * 4, a.x, 0, T * E * 4);
     }
-    let worst = 0;
+    let inEnc = 0;
+    const learn = (ms, layers) => {
+      // Follow slowdowns at once, speedups slowly (thermal throttling only goes one way at a time).
+      const est = ms / (layers * T);
+      this.msPerLayerToken = est > this.msPerLayerToken ? est : 0.8 * this.msPerLayerToken + 0.2 * est;
+    };
     for (let i = 0; i < this.nLayer; i++) {
       this.#layer(enc, i, T, pos0);
-      if ((i + 1) % per === 0 && i + 1 < this.nLayer) {
-        worst = Math.max(worst, await this.#submit(enc));
+      inEnc++;
+      if (inEnc === per && i + 1 < this.nLayer) {
+        const ms = await this.#submit(enc);
+        if (T > 1) learn(ms, inEnc);
+        inEnc = 0;
         enc = gpu.device.createCommandEncoder();
       }
     }
     this.#norm(enc, a.x, this.w['output_norm.weight'].buf, a.headIn, 1, E, { xOff: (T - 1) * E });
     const head = this.w['token_embd.weight'];
     gpu.dispatch(enc, K.matmulQ6_K, [this.#u(head.rows, E, 0, 0), head.buf, a.headIn, a.logits], [Math.min(head.rows, 32768), Math.ceil(head.rows / 32768)]);
-    worst = Math.max(worst, await this.#submit(enc));
-    if (T > 1 && worst > this.submitBudgetMs && this.layersPerSubmit > 1) this.layersPerSubmit = Math.max(1, this.layersPerSubmit >> 1);
-    if (T > 1 && worst > this.submitBudgetMs && this.layersPerSubmit === 1 && this.chunk > 8) this.chunk >>= 1;
+    const ms = await this.#submit(enc);
+    if (T > 1 && inEnc) learn(ms, inEnc);
+    // Even one layer per submit would be over budget: read fewer tokens at a time (and more again when it's fast).
+    if (this.msPerLayerToken * this.chunk > this.submitBudgetMs && this.chunk > 8) this.chunk >>= 1;
+    else if (this.msPerLayerToken * this.chunk * 2 < this.submitBudgetMs / 2 && this.chunk * 2 <= this.maxChunk) this.chunk *= 2;
     this.pos += T;
   }
 
