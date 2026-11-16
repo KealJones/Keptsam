@@ -2,25 +2,10 @@
 // SwiGLU FFN, tied Q6_K embedding/head. See docs/design.md for the math.
 
 import { readGGUF, archKey } from '../gguf.js';
-import { repackQ4_0, repackQ6_K } from '../quant.js';
+import { streamTensors } from '../loader.js';
 import * as K from '../kernels.js';
 
-const WINDOW_READ = 16 << 20; // bytes per HTTP/file read
-const PIECE = 8 << 20; // max bytes repacked at once
 const MM = {}; // matmul source by tokens-per-pass
-
-/** Reads a source through one moving window so neighbouring small tensors share a request. */
-function windowed(src, fileEnd) {
-  let start = 0, buf = new Uint8Array(0);
-  return async (offset, length) => {
-    if (offset >= start && offset + length <= start + buf.length) return buf.subarray(offset - start, offset - start + length);
-    buf = null; // drop the old window before reading the next one
-    const n = Math.min(Math.max(length, WINDOW_READ), fileEnd - offset);
-    buf = await src.read(offset, n);
-    start = offset;
-    return buf.subarray(0, length);
-  };
-}
 
 export class LFM3 {
   /**
@@ -67,49 +52,7 @@ export class LFM3 {
   }
 
   async #stream(src, onProgress) {
-    const gpu = this.gpu, q = gpu.device.queue;
-    const tensors = [...this.gguf.tensors].sort((a, b) => a.offset - b.offset);
-    const end = tensors.at(-1).offset + tensors.at(-1).nbytes;
-    const total = tensors.reduce((s, t) => s + t.nbytes, 0);
-    const read = windowed(src, end);
-    let loaded = 0;
-    for (const t of tensors) {
-      let buf, rec;
-      if (t.typeName === 'Q4_0') {
-        const blocks = t.count / 32;
-        buf = gpu.buffer(blocks * 16 + Math.ceil(blocks / 2) * 4, 'weights');
-        rec = { buf, type: 'Q4_0', dOff: blocks * 4, rows: t.dims[1], K: t.dims[0] };
-        const step = Math.floor(PIECE / 36) * 2; // even block count per piece
-        for (let b0 = 0; b0 < blocks; b0 += step) {
-          const n = Math.min(step, blocks - b0);
-          const { d, qs } = repackQ4_0(await read(t.offset + b0 * 18, n * 18));
-          q.writeBuffer(buf, b0 * 16, qs);
-          q.writeBuffer(buf, blocks * 16 + b0 * 2, d);
-        }
-      } else if (t.typeName === 'Q6_K') {
-        const blocks = t.count / 256;
-        buf = gpu.buffer(blocks * 212, 'weights');
-        rec = { buf, type: 'Q6_K', rows: t.dims[1], K: t.dims[0] };
-        const step = Math.floor(PIECE / 210);
-        for (let b0 = 0; b0 < blocks; b0 += step) {
-          const n = Math.min(step, blocks - b0);
-          q.writeBuffer(buf, b0 * 212, repackQ6_K(await read(t.offset + b0 * 210, n * 210)).words);
-        }
-      } else if (t.typeName === 'F32') {
-        buf = gpu.buffer(t.nbytes, 'weights');
-        rec = { buf, type: 'F32' };
-        const bytes = await read(t.offset, t.nbytes);
-        q.writeBuffer(buf, 0, bytes.slice());
-      } else {
-        throw new Error(`${t.name}: ${t.typeName} weights are not supported yet`);
-      }
-      this.w[t.name] = rec;
-      loaded += t.nbytes;
-      // Let the GPU take the writes before reading more, so staging copies don't pile up.
-      if (loaded % (64 << 20) < t.nbytes) await q.onSubmittedWorkDone();
-      onProgress?.({ loaded, total, tensor: t.name });
-    }
-    await q.onSubmittedWorkDone();
+    this.w = await streamTensors(this.gpu, src, this.gguf.tensors, { tag: 'weights', onProgress });
   }
 
   #allocState() {
@@ -169,14 +112,26 @@ export class LFM3 {
    * Layers are split across several GPU submits; if one takes longer than `submitBudgetMs`, later forwards
    * use fewer layers per submit, so no command buffer gets near WebKit's ~3 s watchdog.
    */
-  async forward(tokens) {
-    const T = tokens.length, E = this.nEmbd, a = this.a, gpu = this.gpu, pos0 = this.pos;
+  async forward(tokens) { return this.#forward(tokens.length, tokens, null); }
+
+  /**
+   * Runs precomputed input embeddings (e.g. image or audio tokens from an encoder) through the model:
+   * rows row0 … row0+T-1 of `buf`, each nEmbd floats.
+   */
+  async forwardEmbeds(buf, row0, T) { return this.#forward(T, null, { buf, row0 }); }
+
+  async #forward(T, tokens, embeds) {
+    const E = this.nEmbd, a = this.a, gpu = this.gpu, pos0 = this.pos;
     if (T > this.chunk) throw new Error(`forward takes at most ${this.chunk} tokens`);
     if (pos0 + T > this.ctx) throw new Error('context is full');
-    gpu.device.queue.writeBuffer(a.tok, 0, new Uint32Array(tokens));
     const per = T === 1 ? this.nLayer : this.layersPerSubmit;
     let enc = gpu.device.createCommandEncoder();
-    gpu.dispatch(enc, K.embedQ6_K, [this.#u(E, T, 0, 0), this.w['token_embd.weight'].buf, a.tok, a.x], T);
+    if (tokens) {
+      gpu.device.queue.writeBuffer(a.tok, 0, new Uint32Array(tokens));
+      gpu.dispatch(enc, K.embedQ6_K, [this.#u(E, T, 0, 0), this.w['token_embd.weight'].buf, a.tok, a.x], T);
+    } else {
+      enc.copyBufferToBuffer(embeds.buf, embeds.row0 * E * 4, a.x, 0, T * E * 4);
+    }
     let worst = 0;
     for (let i = 0; i < this.nLayer; i++) {
       this.#layer(enc, i, T, pos0);

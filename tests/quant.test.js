@@ -46,3 +46,17 @@ test('f16 round trip', () => {
     assert.ok(Math.abs(back - v) <= Math.abs(v) * 1e-3 + 6e-8, `${v} -> ${back}`);
   }
 });
+
+test('Q8_0 dequant and repack match the gguf reference', async () => {
+  const { dequantQ8_0, repackQ8_0 } = await import('../src/quant.js');
+  const src = bytes('v_ffn_up.bin');
+  const got = dequantQ8_0(src), want = floats('v_ffn_up.f32');
+  assert.equal(got.length, want.length);
+  for (let i = 0; i < want.length; i++) assert.ok(Math.abs(got[i] - want[i]) < 1e-6, `value ${i}`);
+  const { qs, d, blocks } = repackQ8_0(src);
+  const q8 = new Uint8Array(qs.buffer), d16 = new Uint16Array(d.buffer);
+  for (let b = 0; b < blocks; b++) {
+    assert.equal(d16[b], src[b * 34] | (src[b * 34 + 1] << 8));
+    for (let j = 0; j < 32; j++) assert.equal(q8[b * 32 + j], src[b * 34 + 2 + j]);
+  }
+});

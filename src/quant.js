@@ -107,3 +107,37 @@ export function dequantQ6_K(src) {
   }
   return out;
 }
+
+export const Q8_0 = { block: 32, bytes: 34 };
+
+/** Splits Q8_0 blocks into int8 quant words (8 per block) and f16 scale pairs. */
+export function repackQ8_0(src) {
+  const n = src.length / Q8_0.bytes;
+  if (!Number.isInteger(n)) throw new Error('Q8_0 data is not a whole number of blocks');
+  const d = new Uint16Array(n + (n & 1));
+  const qs = new Uint8Array(n * 32);
+  for (let b = 0, o = 0; b < n; b++, o += 34) {
+    d[b] = src[o] | (src[o + 1] << 8);
+    qs.set(src.subarray(o + 2, o + 34), b * 32);
+  }
+  return { d: new Uint32Array(d.buffer), qs: new Uint32Array(qs.buffer), blocks: n };
+}
+
+/** Reference: Q8_0 blocks → float32. */
+export function dequantQ8_0(src) {
+  const n = src.length / 34;
+  const out = new Float32Array(n * 32);
+  for (let b = 0; b < n; b++) {
+    const d = f16ToF32(src[b * 34] | (src[b * 34 + 1] << 8));
+    for (let j = 0; j < 32; j++) out[b * 32 + j] = ((src[b * 34 + 2 + j] << 24) >> 24) * d;
+  }
+  return out;
+}
+
+/** F16 bytes → Float32Array. */
+export function f16BytesToF32(src) {
+  const h = new Uint16Array(src.buffer, src.byteOffset, src.length / 2);
+  const out = new Float32Array(h.length);
+  for (let i = 0; i < h.length; i++) out[i] = f16ToF32(h[i]);
+  return out;
+}

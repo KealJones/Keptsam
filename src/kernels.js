@@ -283,3 +283,243 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let g = G[i];
   G[i] = g / (1.0 + exp(-g)) * U[i];
 }`;
+
+// ───────────── Shared by the Omni senses (encoders run all positions at once, non-causal) ─────────────
+
+/** Y[t, r] = W[r, :] · X[t, :] (+ b[r]) for a Q8_0 weight. One workgroup per row, `mt` tokens per pass. */
+export const matmulQ8_0 = (mt = MAXT) => /* wgsl */ `
+struct P { rows: u32, K: u32, T: u32, dOff: u32, bias: u32, pad0: u32, pad1: u32, pad2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<u32>;
+@group(0) @binding(2) var<storage, read> X: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+@group(0) @binding(4) var<storage, read> B: array<f32>;
+const WG = 64u;
+const MT = ${mt}u;
+var<workgroup> red: array<f32, ${64 * mt}>;
+fn s8(w: u32, j: u32) -> f32 { let b = (w >> (j * 8u)) & 0xffu; return f32(select(i32(b), i32(b) - 256, b >= 128u)); }
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let row = wid.y * 32768u + wid.x;
+  let t0 = wid.z * MT;
+  if (row >= p.rows) { return; }
+  let nT = min(MT, p.T - t0);
+  let nb = p.K / 32u;
+  var acc: array<f32, ${mt}>;
+  for (var b = lid.x; b < nb; b += WG) {
+    let blk = row * nb + b;
+    let dw = W[p.dOff + (blk >> 1u)];
+    let d = select(unpack2x16float(dw).x, unpack2x16float(dw).y, (blk & 1u) == 1u);
+    for (var w = 0u; w < 8u; w++) {
+      let q = W[blk * 8u + w];
+      for (var j = 0u; j < 4u; j++) {
+        let v = s8(q, j) * d;
+        let k = b * 32u + w * 4u + j;
+        for (var t = 0u; t < nT; t++) { acc[t] += v * X[(t0 + t) * p.K + k]; }
+      }
+    }
+  }
+  for (var t = 0u; t < MT; t++) { red[t * WG + lid.x] = acc[t]; }
+  workgroupBarrier();
+  for (var s = WG / 2u; s > 0u; s >>= 1u) {
+    if (lid.x < s) { for (var t = 0u; t < MT; t++) { red[t * WG + lid.x] += red[t * WG + lid.x + s]; } }
+    workgroupBarrier();
+  }
+  if (lid.x < nT) {
+    var v = red[lid.x * WG];
+    if (p.bias == 1u) { v += B[row]; }
+    Y[(t0 + lid.x) * p.rows + row] = v;
+  }
+}`;
+
+/** Y[t, r] = W[r, :] · X[t, :] (+ b[r]) for an f32 weight. */
+export const matmulF32 = (mt = MAXT) => /* wgsl */ `
+struct P { rows: u32, K: u32, T: u32, bias: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<f32>;
+@group(0) @binding(2) var<storage, read> X: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+@group(0) @binding(4) var<storage, read> B: array<f32>;
+const WG = 64u;
+const MT = ${mt}u;
+var<workgroup> red: array<f32, ${64 * mt}>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let row = wid.y * 32768u + wid.x;
+  let t0 = wid.z * MT;
+  if (row >= p.rows) { return; }
+  let nT = min(MT, p.T - t0);
+  var acc: array<f32, ${mt}>;
+  for (var k = lid.x; k < p.K; k += WG) {
+    let w = W[row * p.K + k];
+    for (var t = 0u; t < nT; t++) { acc[t] += w * X[(t0 + t) * p.K + k]; }
+  }
+  for (var t = 0u; t < MT; t++) { red[t * WG + lid.x] = acc[t]; }
+  workgroupBarrier();
+  for (var s = WG / 2u; s > 0u; s >>= 1u) {
+    if (lid.x < s) { for (var t = 0u; t < MT; t++) { red[t * WG + lid.x] += red[t * WG + lid.x + s]; } }
+    workgroupBarrier();
+  }
+  if (lid.x < nT) {
+    var v = red[lid.x * WG];
+    if (p.bias == 1u) { v += B[row]; }
+    Y[(t0 + lid.x) * p.rows + row] = v;
+  }
+}`;
+
+/** LayerNorm with bias over rows of length N. */
+export const layernorm = /* wgsl */ `
+struct P { N: u32, eps: f32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> Y: array<f32>;
+var<workgroup> red: array<f32, 128>;
+@compute @workgroup_size(128)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let base = wid.x * p.N;
+  var s = 0.0;
+  for (var i = lid.x; i < p.N; i += 128u) { s += X[base + i]; }
+  red[lid.x] = s; workgroupBarrier();
+  for (var k = 64u; k > 0u; k >>= 1u) { if (lid.x < k) { red[lid.x] += red[lid.x + k]; } workgroupBarrier(); }
+  let mean = red[0] / f32(p.N); workgroupBarrier();
+  var v = 0.0;
+  for (var i = lid.x; i < p.N; i += 128u) { let d = X[base + i] - mean; v += d * d; }
+  red[lid.x] = v; workgroupBarrier();
+  for (var k = 64u; k > 0u; k >>= 1u) { if (lid.x < k) { red[lid.x] += red[lid.x + k]; } workgroupBarrier(); }
+  let inv = inverseSqrt(red[0] / f32(p.N) + p.eps);
+  for (var i = lid.x; i < p.N; i += 128u) { Y[base + i] = (X[base + i] - mean) * inv * w[i] + b[i]; }
+}`;
+
+/** In place: X = gelu(X) with erf (HF "gelu"). */
+export const geluErf = /* wgsl */ `
+struct P { n: u32, pad0: u32, pad1: u32, pad2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> X: array<f32>;
+// erf with |error| < 1.5e-7 (Abramowitz & Stegun 7.1.26)
+fn erf(x: f32) -> f32 {
+  let s = sign(x); let a = abs(x);
+  let t = 1.0 / (1.0 + 0.3275911 * a);
+  let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-a * a);
+  return s * y;
+}
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.y * 65535u * 256u + gid.x;
+  if (i >= p.n) { return; }
+  let x = X[i];
+  X[i] = 0.5 * x * (1.0 + erf(x * 0.7071067811865476));
+}`;
+
+/** Y = X + R elementwise (residual add into Y). */
+export const addInto = /* wgsl */ `
+struct P { n: u32, pad0: u32, pad1: u32, pad2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.y * 65535u * 256u + gid.x;
+  if (i < p.n) { Y[i] += X[i]; }
+}`;
+
+/** LFM3-VL 2D RoPE in place on [N, H, 64]: pairs (i, i+32); i < 16 rotate by row y, i ≥ 16 by column x. */
+export const rope2d = /* wgsl */ `
+struct P { H: u32, pw: u32, base: f32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> V: array<f32>;
+@compute @workgroup_size(32)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let n = wid.x / p.H;
+  let base = wid.x * 64u;
+  let i = lid.x;
+  let y = f32(n / p.pw); let x = f32(n % p.pw);
+  let k = select(i, i - 16u, i >= 16u);
+  let pos = select(y, x, i >= 16u);
+  let theta = pos * pow(p.base, -2.0 * f32(k) / 32.0);
+  let c = cos(theta); let s = sin(theta);
+  let a = V[base + i]; let b = V[base + i + 32u];
+  V[base + i] = a * c - b * s;
+  V[base + i + 32u] = a * s + b * c;
+}`;
+
+/** Non-causal scores for a block of queries: S[(q·H + h), j] = Q[q0+q, h] · K[j, h / (H/HK)] · scale. */
+export const encScores = /* wgsl */ `
+struct P { N: u32, q0: u32, H: u32, HK: u32, D: u32, scale: f32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> Q: array<f32>;
+@group(0) @binding(2) var<storage, read> K: array<f32>;
+@group(0) @binding(3) var<storage, read_write> S: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let j = gid.x; let qh = gid.y;
+  if (j >= p.N) { return; }
+  let q = qh / p.H; let h = qh % p.H;
+  let qb = ((p.q0 + q) * p.H + h) * p.D;
+  let kb = (j * p.HK + h / (p.H / p.HK)) * p.D;
+  var acc = 0.0;
+  for (var d = 0u; d < p.D; d++) { acc += Q[qb + d] * K[kb + d]; }
+  S[qh * p.N + j] = acc * p.scale;
+}`;
+
+/** O[q0+q, h, :] = Σ_j S[(q·H + h), j] · V[j, h / (H/HK), :]. One workgroup per (q, h), D threads. */
+export const encOut = /* wgsl */ `
+struct P { N: u32, q0: u32, H: u32, HK: u32, D: u32, pad0: u32, pad1: u32, pad2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> S: array<f32>;
+@group(0) @binding(2) var<storage, read> V: array<f32>;
+@group(0) @binding(3) var<storage, read_write> O: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let qh = wid.x; let q = qh / p.H; let h = qh % p.H;
+  for (var d = lid.x; d < p.D; d += 64u) {
+    var acc = 0.0;
+    for (var j = 0u; j < p.N; j++) { acc += S[qh * p.N + j] * V[(j * p.HK + h / (p.H / p.HK)) * p.D + d]; }
+    O[((p.q0 + q) * p.H + h) * p.D + d] = acc;
+  }
+}`;
+
+/** LFM3-VL conv block core: Y[n, c] = middle · dwconv3x3(first ⊙ third) over the pw × ph patch grid (zero pad). */
+export const dwconv3 = /* wgsl */ `
+struct P { pw: u32, ph: u32, C: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let c = gid.x; let n = gid.y;
+  if (c >= p.C) { return; }
+  let y = i32(n / p.pw); let x = i32(n % p.pw);
+  var acc = 0.0;
+  for (var ky = 0; ky < 3; ky++) {
+    for (var kx = 0; kx < 3; kx++) {
+      let yy = y + ky - 1; let xx = x + kx - 1;
+      if (yy >= 0 && xx >= 0 && yy < i32(p.ph) && xx < i32(p.pw)) {
+        let m = u32(yy) * p.pw + u32(xx);
+        let g = X[m * 3u * p.C + c] * X[m * 3u * p.C + 2u * p.C + c];
+        acc += g * w[c * 9u + u32(ky) * 3u + u32(kx)];
+      }
+    }
+  }
+  Y[n * p.C + c] = X[n * 3u * p.C + p.C + c] * acc;
+}`;
+
+/** 2×2 patch merge: out[t] = [patch(2gx,2gy), patch(2gx+1,2gy), patch(2gx,2gy+1), patch(2gx+1,2gy+1)]. */
+export const merge2x2 = /* wgsl */ `
+struct P { pw: u32, C: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = wid.x;
+  let gw = p.pw / 2u;
+  let gx = t % gw; let gy = t / gw;
+  for (var k = lid.x; k < 4u * p.C; k += 256u) {
+    let sub = k / p.C; let c = k % p.C;
+    let px = 2u * gx + (sub & 1u); let py = 2u * gy + (sub >> 1u);
+    Y[t * 4u * p.C + k] = X[(py * p.pw + px) * p.C + c];
+  }
+}`;
