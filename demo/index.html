@@ -35,6 +35,22 @@
 <div id="out"></div>
 <div id="stats"></div>
 
+<script>
+// Optional phone-relay attachment for remote testing: ?relay=<agent.js URL>. Only origins listed here may
+// load, since an agent script runs with this page's full access.
+(() => {
+  const RELAY_ORIGINS = ['https://phone-relay.kealjones.workers.dev'];
+  const r = new URLSearchParams(location.search).get('relay');
+  if (!r) return;
+  try {
+    const u = new URL(r);
+    if (!RELAY_ORIGINS.includes(u.origin) || u.pathname !== '/agent.js') return;
+    const s = document.createElement('script');
+    s.src = u.href;
+    document.head.append(s);
+  } catch {}
+})();
+</script>
 <script type="module">
 import { Keptsam } from '../src/index.js';
 
@@ -42,6 +58,7 @@ const $ = (id) => document.getElementById(id);
 const stats = (extra = '') => { $('stats').textContent = (llm ? JSON.stringify(llm.stats(), null, 1) : '') + extra; };
 let llm = null;
 const messages = [];
+window.keptsam = { get llm() { return llm; }, messages };
 
 $('load').onclick = async () => {
   $('load').disabled = true;
