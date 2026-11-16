@@ -61,6 +61,9 @@ export class LFM3 {
     this.vocab = this.tokenizer.tokens.length;
     this.w = {};
     this.pos = 0;
+    /** Prefill layers per GPU submit; halves when a submit runs over budget. */
+    this.layersPerSubmit = 6;
+    this.submitBudgetMs = 1000;
   }
 
   async #stream(src, onProgress) {
@@ -161,59 +164,77 @@ export class LFM3 {
     this.gpu.dispatch(enc, K.rmsnorm, [this.#uf([N, mode, this.eps, N, xOff, yOff, 0, 0], [2]), X, w, Y], rows);
   }
 
-  /** Runs tokens (≤ chunk) through the model at the current position. */
+  /**
+   * Runs tokens (≤ chunk) through the model at the current position.
+   * Layers are split across several GPU submits; if one takes longer than `submitBudgetMs`, later forwards
+   * use fewer layers per submit, so no command buffer gets near WebKit's ~3 s watchdog.
+   */
   async forward(tokens) {
-    const T = tokens.length, E = this.nEmbd, F = this.nFF, a = this.a, gpu = this.gpu, pos0 = this.pos;
+    const T = tokens.length, E = this.nEmbd, a = this.a, gpu = this.gpu, pos0 = this.pos;
     if (T > this.chunk) throw new Error(`forward takes at most ${this.chunk} tokens`);
     if (pos0 + T > this.ctx) throw new Error('context is full');
     gpu.device.queue.writeBuffer(a.tok, 0, new Uint32Array(tokens));
-    const pre = (i) => `blk.${i}.`;
-    const enc = gpu.device.createCommandEncoder();
+    const per = T === 1 ? this.nLayer : this.layersPerSubmit;
+    let enc = gpu.device.createCommandEncoder();
     gpu.dispatch(enc, K.embedQ6_K, [this.#u(E, T, 0, 0), this.w['token_embd.weight'].buf, a.tok, a.x], T);
+    let worst = 0;
     for (let i = 0; i < this.nLayer; i++) {
-      const L = this.layers[i], p = pre(i), c = this.cache[i];
-      this.#norm(enc, a.x, this.w[p + 'attn_norm.weight'].buf, a.h, T, E);
-      if (!L.attn) {
-        this.#matmul(enc, p + 'shortconv.in_proj.weight', a.h, a.bcx, T);
-        gpu.dispatch(enc, K.shortconv, [this.#u(T, E, 0, 0), a.bcx, this.w[p + 'shortconv.conv.weight'].buf, c.state, a.att], Math.ceil(E / 64));
-        this.#matmul(enc, p + 'shortconv.out_proj.weight', a.att, a.y, T);
-      } else {
-        this.#matmul(enc, p + 'attn_q.weight', a.h, a.q, T);
-        this.#matmul(enc, p + 'attn_k.weight', a.h, a.k, T);
-        this.#matmul(enc, p + 'attn_v.weight', a.h, a.v, T);
-        this.#matmul(enc, p + 'attn_gate.weight', a.h, a.gate, T);
-        this.#norm(enc, a.q, this.w[p + 'attn_q_norm.weight'].buf, a.qn, T * 16, 128);
-        this.#norm(enc, a.k, this.w[p + 'attn_k_norm.weight'].buf, a.kn, T * 4, 128);
-        const base = L.swa ? this.ropeBaseSWA : this.ropeBase;
-        const factors = L.swa ? a.ones : this.w['rope_freqs.weight'].buf;
-        gpu.dispatch(enc, K.rope, [this.#uf([16, pos0, base, 0], [2]), a.qn, factors], T * 16);
-        gpu.dispatch(enc, K.rope, [this.#uf([4, pos0, base, 0], [2]), a.kn, factors], T * 4);
-        gpu.dispatch(enc, K.kvWrite, [this.#u(pos0, c.slots, 0, 0), a.kn, a.v, c.k, c.v], T);
-        const Lk = Math.min(pos0 + T, c.slots);
-        const win = L.swa ? this.window : 0xffffffff;
-        gpu.dispatch(enc, K.attnScores, [this.#u(pos0, T, c.slots, Lk, win, this.ctx, 0, 0), a.qn, c.k, a.S], [Math.ceil(Lk / 64), T * 16]);
-        gpu.dispatch(enc, K.softmax, [this.#u(Lk, this.ctx, 0, 0), a.S], T * 16);
-        gpu.dispatch(enc, K.attnOut, [this.#u(Lk, this.ctx, 0, 0), a.S, c.v, a.gate, a.att], T * 16);
-        this.#matmul(enc, p + 'attn_output.weight', a.att, a.y, T);
+      this.#layer(enc, i, T, pos0);
+      if ((i + 1) % per === 0 && i + 1 < this.nLayer) {
+        worst = Math.max(worst, await this.#submit(enc));
+        enc = gpu.device.createCommandEncoder();
       }
-      this.#norm(enc, a.y, this.w[p + 'post_attention_norm.weight'].buf, a.x, T, E, { mode: 1 });
-      this.#norm(enc, a.x, this.w[p + 'ffn_norm.weight'].buf, a.h, T, E);
-      this.#matmul(enc, p + 'ffn_gate.weight', a.h, a.g, T);
-      this.#matmul(enc, p + 'ffn_up.weight', a.h, a.u, T);
-      const n = T * F;
-      gpu.dispatch(enc, K.swiglu, [this.#u(n, 0, 0, 0), a.g, a.u], [Math.min(Math.ceil(n / 256), 65535), Math.ceil(n / 256 / 65535)]);
-      this.#matmul(enc, p + 'ffn_down.weight', a.g, a.y, T);
-      this.#norm(enc, a.y, this.w[p + 'post_ffw_norm.weight'].buf, a.x, T, E, { mode: 1 });
     }
     this.#norm(enc, a.x, this.w['output_norm.weight'].buf, a.headIn, 1, E, { xOff: (T - 1) * E });
     const head = this.w['token_embd.weight'];
     gpu.dispatch(enc, K.matmulQ6_K, [this.#u(head.rows, E, 0, 0), head.buf, a.headIn, a.logits], [Math.min(head.rows, 32768), Math.ceil(head.rows / 32768)]);
-    const t0 = performance.now();
-    gpu.device.queue.submit([enc.finish()]);
-    await gpu.device.queue.onSubmittedWorkDone();
-    gpu.longestSubmit = Math.max(gpu.longestSubmit, performance.now() - t0);
-    for (const b of this._uniforms.splice(0)) b.destroy();
+    worst = Math.max(worst, await this.#submit(enc));
+    if (T > 1 && worst > this.submitBudgetMs && this.layersPerSubmit > 1) this.layersPerSubmit = Math.max(1, this.layersPerSubmit >> 1);
+    if (T > 1 && worst > this.submitBudgetMs && this.layersPerSubmit === 1 && this.chunk > 8) this.chunk >>= 1;
     this.pos += T;
+  }
+
+  async #submit(enc) {
+    const ms = await this.gpu.run(() => {}, enc);
+    for (const b of this._uniforms.splice(0)) b.destroy();
+    return ms;
+  }
+
+  #layer(enc, i, T, pos0) {
+    const E = this.nEmbd, F = this.nFF, a = this.a, gpu = this.gpu;
+    const L = this.layers[i], p = `blk.${i}.`, c = this.cache[i];
+    this.#norm(enc, a.x, this.w[p + 'attn_norm.weight'].buf, a.h, T, E);
+    if (!L.attn) {
+      this.#matmul(enc, p + 'shortconv.in_proj.weight', a.h, a.bcx, T);
+      gpu.dispatch(enc, K.shortconv, [this.#u(T, E, 0, 0), a.bcx, this.w[p + 'shortconv.conv.weight'].buf, c.state, a.att], Math.ceil(E / 64));
+      this.#matmul(enc, p + 'shortconv.out_proj.weight', a.att, a.y, T);
+    } else {
+      this.#matmul(enc, p + 'attn_q.weight', a.h, a.q, T);
+      this.#matmul(enc, p + 'attn_k.weight', a.h, a.k, T);
+      this.#matmul(enc, p + 'attn_v.weight', a.h, a.v, T);
+      this.#matmul(enc, p + 'attn_gate.weight', a.h, a.gate, T);
+      this.#norm(enc, a.q, this.w[p + 'attn_q_norm.weight'].buf, a.qn, T * 16, 128);
+      this.#norm(enc, a.k, this.w[p + 'attn_k_norm.weight'].buf, a.kn, T * 4, 128);
+      const base = L.swa ? this.ropeBaseSWA : this.ropeBase;
+      const factors = L.swa ? a.ones : this.w['rope_freqs.weight'].buf;
+      gpu.dispatch(enc, K.rope, [this.#uf([16, pos0, base, 0], [2]), a.qn, factors], T * 16);
+      gpu.dispatch(enc, K.rope, [this.#uf([4, pos0, base, 0], [2]), a.kn, factors], T * 4);
+      gpu.dispatch(enc, K.kvWrite, [this.#u(pos0, c.slots, 0, 0), a.kn, a.v, c.k, c.v], T);
+      const Lk = Math.min(pos0 + T, c.slots);
+      const win = L.swa ? this.window : 0xffffffff;
+      gpu.dispatch(enc, K.attnScores, [this.#u(pos0, T, c.slots, Lk, win, this.ctx, 0, 0), a.qn, c.k, a.S], [Math.ceil(Lk / 64), T * 16]);
+      gpu.dispatch(enc, K.softmax, [this.#u(Lk, this.ctx, 0, 0), a.S], T * 16);
+      gpu.dispatch(enc, K.attnOut, [this.#u(Lk, this.ctx, 0, 0), a.S, c.v, a.gate, a.att], T * 16);
+      this.#matmul(enc, p + 'attn_output.weight', a.att, a.y, T);
+    }
+    this.#norm(enc, a.y, this.w[p + 'post_attention_norm.weight'].buf, a.x, T, E, { mode: 1 });
+    this.#norm(enc, a.x, this.w[p + 'ffn_norm.weight'].buf, a.h, T, E);
+    this.#matmul(enc, p + 'ffn_gate.weight', a.h, a.g, T);
+    this.#matmul(enc, p + 'ffn_up.weight', a.h, a.u, T);
+    const n = T * F;
+    gpu.dispatch(enc, K.swiglu, [this.#u(n, 0, 0, 0), a.g, a.u], [Math.min(Math.ceil(n / 256), 65535), Math.ceil(n / 256 / 65535)]);
+    this.#matmul(enc, p + 'ffn_down.weight', a.g, a.y, T);
+    this.#norm(enc, a.y, this.w[p + 'post_ffw_norm.weight'].buf, a.x, T, E, { mode: 1 });
   }
 
   /** Logits of the last token from the latest forward(). */

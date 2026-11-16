@@ -29,7 +29,12 @@ export function httpSource(url, { fetchImpl = fetch } = {}) {
       const buf = new Uint8Array(await res.arrayBuffer());
       // A server that ignores Range sends the whole file; slice it rather than fail.
       if (res.status === 200 && buf.length > length) return buf.subarray(offset, offset + length);
-      if (buf.length !== length) throw new Error(`GGUF short read: wanted ${length} bytes at ${offset}, got ${buf.length}`);
+      const total = Number(/\/(\d+)$/.exec(res.headers.get('Content-Range') || '')?.[1]);
+      if (total) this.size = total;
+      // Reads that run past the end of the file come back short; that's fine at the end.
+      if (buf.length !== length && !(total && offset + buf.length === total)) {
+        throw new Error(`GGUF short read: wanted ${length} bytes at ${offset}, got ${buf.length}`);
+      }
       return buf;
     },
   };

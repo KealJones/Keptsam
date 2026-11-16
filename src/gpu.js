@@ -94,8 +94,7 @@ export class Gpu {
   }
 
   /** Submits `record(encoder)` as one command buffer and waits for the GPU, timing it. */
-  async run(record) {
-    const enc = this.device.createCommandEncoder();
+  async run(record, enc = this.device.createCommandEncoder()) {
     record(enc);
     const t0 = performance.now();
     this.device.queue.submit([enc.finish()]);

@@ -30,8 +30,10 @@ frames does not buy memory.
    number, because other browsers and drivers have their own undocumented limits.
 4. **Only what's needed is resident.** For multimodal models the backbone stays loaded; each sense (vision encoder,
    audio encoder, speech generator) is loaded when needed and freed after.
-5. **GPU only.** No CPU fallback: a 1.7B model on a phone CPU takes minutes to answer "hi".
-6. **No build step.** Plain ES modules with JSDoc types, served as-is (GitHub Pages works). Model-specific code
+5. **Download once.** URLs are cached in Cache Storage in 16 MB pieces (`src/cache.js`), each under its own path:
+   the Cache API ignores `#fragments` when matching, so fragment-keyed pieces would all collide.
+6. **GPU only.** No CPU fallback: a 1.7B model on a phone CPU takes minutes to answer "hi".
+7. **No build step.** Plain ES modules with JSDoc types, served as-is (GitHub Pages works). Model-specific code
    lives in one file per architecture so other models can be added.
 
 ## Model input

@@ -6,9 +6,10 @@
 import { openGpu } from './gpu.js';
 import { httpSource } from './gguf.js';
 import { Tokenizer } from './tokenizer.js';
+import { cachedSource, clearCache } from './cache.js';
 import { LFM3 } from './models/lfm3.js';
 
-export { openGpu, httpSource, Tokenizer, LFM3 };
+export { openGpu, httpSource, Tokenizer, LFM3, cachedSource, clearCache };
 
 const MODELS = { lfm3: LFM3 };
 
@@ -16,11 +17,13 @@ export class Keptsam {
   /**
    * Loads a GGUF model onto the GPU, streaming it in.
    * @param {string | import('./gguf.js').ByteSource} source URL or byte source
-   * @param {{ ctx?: number, chunk?: number, gpu?: import('./gpu.js').Gpu, onProgress?: Function }} [opts]
+   * @param {{ ctx?: number, chunk?: number, cache?: boolean, gpu?: import('./gpu.js').Gpu, onProgress?: Function }} [opts]
+   *   `cache` (default true for URLs) keeps the file in the browser's Cache Storage so it downloads once.
    */
-  static async load(source, { ctx = 4096, chunk = 64, gpu, onProgress } = {}) {
+  static async load(source, { ctx = 4096, chunk = 64, cache = true, gpu, onProgress } = {}) {
     gpu ||= await openGpu();
-    const src = typeof source === 'string' ? httpSource(source) : source;
+    let src = typeof source === 'string' ? httpSource(source) : source;
+    if (typeof source === 'string' && cache) src = await cachedSource(src, { key: source });
     const model = await LFM3.load(gpu, src, { ctx, chunk, onProgress });
     return new Keptsam(gpu, model);
   }
