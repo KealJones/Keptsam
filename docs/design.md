@@ -78,12 +78,27 @@ Kernels read `u32` and use `unpack2x16float`, so `shader-f16` is optional.
 
 Later savings, measured before adopting: English-only vocab trim (~160 MB off the table), f16 KV vs f32.
 
-## Omni later
+## Omni
 
 `LFM3-Omni-2B` = the same backbone + `mmproj`: vision encoder + connector (~203 MB at Q8), audio encoder +
 connector (~123 MB), speech generator `a.gen` (~181 MB). Peak with swapping is the backbone plus the largest single
 sense (~1.3 GB of weights), instead of everything at once (~1.6 GB), which crashed Liquid's own WebGPU Space on an
 iPhone at ~80% loaded.
+
+- **Video** (`src/video.js`, `Keptsam#readVideo`), as llama.cpp's `MTMD_VIDEO_TEMPLATE_LFM3_OMNI` reads it: 2 frames a
+  second at `round(linspace(0, nSrc − 1, n))` of the source frames, n clamped to [4, 384]; frames go in pairs, one
+  temporal patch each (the patchifier's two kernels: `W0·A + W1·B`; a still image is `W0·A + W1·A`). Each pair is
+  `<t seconds>` (printf `%.1f`, ties to even), `<|vision_start|>` pair `<|vision_end|>`, then the pair's slice of the
+  soundtrack, all inside one `<|vision_start|> … <|vision_end|>`. The soundtrack is encoded once as one clip and each
+  pair takes rows `round(cumulative samples / 1280)`, the last pair the rest. Frames are read in the browser with
+  `<video>` + canvas and scaled to `maxPixels` (256×256 → 64 tokens a pair); the vision encoder stays loaded for the
+  clip.
+- **Side sequence**: `LFM3#newSequence(ctx)` is a second set of KV and conv state (activations shared). `speak()` and
+  `transcribe()` run there (2,048 positions, ~55 MB), so the conversation's prompt is still read afterwards.
+- **Snapshots** (`generate({ snapshotAt })`): the conv states and sliding-window rings (~7 MB) are copied at a token
+  count the next prompt is sure to share; a prompt that starts with those tokens goes back there and reads only the
+  rest. Global KV slots up to that point are never written again, so they need no copy. This is what lets a chat
+  template that drops the last turn's thinking, or a reply re-tokenized differently, still reuse the prompt.
 
 ## Testing
 

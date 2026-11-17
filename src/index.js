@@ -6,17 +6,20 @@
 import { openGpu } from './gpu.js';
 import { httpSource } from './gguf.js';
 import { Tokenizer } from './tokenizer.js';
-import { cachedSource, clearCache } from './cache.js';
+import { cachedSource, clearCache, cacheFile, cachedFileInfo, removeCachedFile } from './cache.js';
 import { readGGUF } from './gguf.js';
 import { LFM3 } from './models/lfm3.js';
 import { LFM3Vision } from './models/lfm3vl.js';
 import { LFM3Audio } from './models/lfm3a.js';
 import { patchify } from './image.js';
+import { readVideo, groups as videoGroups, frameTimes } from './video.js';
 import { logMel, decodeAudio, parseWav } from './audio.js';
 import { LFM3SpeechGen } from './models/lfm3gen.js';
 import { Istft, sampleCode, wav, SPEECH_RATE } from './speech.js';
 
-export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, LFM3Audio, LFM3SpeechGen, cachedSource, clearCache, patchify, logMel, decodeAudio, parseWav, wav, SPEECH_RATE };
+export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, LFM3Audio, LFM3SpeechGen, cachedSource, clearCache, cacheFile, cachedFileInfo, removeCachedFile, patchify, logMel, decodeAudio, parseWav, wav, SPEECH_RATE, readVideo, frameTimes };
+
+const roundEven = (x) => { const r = Math.round(x); return Math.abs(x % 1) === 0.5 && r % 2 ? r - 1 : r; };
 
 export class Keptsam {
   /**
@@ -59,8 +62,8 @@ export class Keptsam {
   /**
    * Formats messages with the model's chat format (system/user/assistant; tools are left to the caller).
    * Content is a string, or an array of parts: strings, { type: 'text', text }, { type: 'image', image },
-   * { type: 'audio', audio } (16 kHz mono Float32Array; see decodeAudio).
-   * Returns a string, or (with media) an array of strings and { image } / { audio } parts.
+   * { type: 'audio', audio } (16 kHz mono Float32Array; see decodeAudio), { type: 'video', video } (from readVideo).
+   * Returns a string, or (with media) an array of strings and { image } / { audio } / { video } parts.
    * @param {{ role: string, content: string | any[] }[]} messages
    */
   formatChat(messages, { thinking = true } = {}) {
@@ -72,6 +75,7 @@ export class Keptsam {
         if (typeof p === 'string') push(p);
         else if (p.type === 'image') { push('<|vision_start|>'); push({ image: p.image }); push('<|vision_end|>'); }
         else if (p.type === 'audio') { push('<|vision_start|>'); push({ audio: p.audio }); push('<|vision_end|>'); }
+        else if (p.type === 'video') { push('<|vision_start|>'); push({ video: p.video }); push('<|vision_end|>'); }
         else push(String(p.text ?? ''));
       }
     };
@@ -94,34 +98,51 @@ export class Keptsam {
 
   /**
    * Generates text after `prompt`: a string, token ids, or an array of strings and { image } parts.
-   * If the prompt starts with everything the model has already read (same tokens, same image objects),
-   * only the new part is read; otherwise the model starts over.
+   * If the prompt starts with everything the model has already read (same tokens, same media objects), only the
+   * new part is read. `snapshotAt` (a token count into the prompt) remembers the model's state at that point:
+   * a later prompt that starts with those same tokens goes back there and reads only the rest, even after a reply
+   * whose words were tokenized differently or a different continuation (e.g. a chat template that rewrites the end).
+   * Otherwise the model starts over.
    * @param {string | number[] | (string | { image: any })[]} prompt
    * @param {{ maxTokens?: number, temperature?: number, topK?: number, topP?: number, repeatPenalty?: number,
-   *   stop?: string[], onToken?: (text: string, id: number) => void, onStatus?: (s: string) => void, signal?: AbortSignal }} [opts]
+   *   stop?: string[], snapshotAt?: number, onToken?: (text: string, id: number) => void, onStatus?: (s: string) => void,
+   *   onRead?: (r: { reused: number, read: number }) => void, signal?: AbortSignal }} [opts]
    */
   async generate(prompt, opts = {}) {
     const o = { maxTokens: 512, topP: 1, stop: [], ...this.defaults, ...opts };
-    // Items: token ids, or image parts (one item each, compared by identity).
-    const items = typeof prompt === 'string' ? this.tokenizer.encode(prompt)
-      : prompt.flatMap((p) => (typeof p === 'number' ? [p] : typeof p === 'string' ? this.tokenizer.encode(p) : [p]));
+    const items = this.items(prompt);
     const m = this.model;
     const h = this.history;
-    const reuse = h.length < items.length && h.every((t, i) => t === items[i]);
-    if (!reuse) { m.reset(); this.history = []; }
-    const fresh = items.slice(this.history.length);
+    const prefix = (a) => a && a.length < items.length && a.every((t, i) => t === items[i]);
+    if (prefix(h) && (h.length || m.pos === 0)) {
+      // carry on from what was read
+    } else if (this.snap && prefix(this.snap)) {
+      await m.restore();
+      this.history = this.snap.slice();
+    } else {
+      m.reset(); this.history = []; this.snap = null;
+    }
+    const start = this.history.length;
+    const fresh = items.slice(start);
+    this.history = []; // until the whole prompt is read: a read cut short leaves the model somewhere in between
+    const mark = o.snapshotAt > start && o.snapshotAt < items.length ? o.snapshotAt - start : -1;
     for (let i = 0; i < fresh.length;) {
       if (o.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (i === mark) { await m.snapshot(); this.snap = items.slice(0, start + i); }
       if (typeof fresh[i] !== 'number') {
-        if (fresh[i].audio) await this.#readAudio(fresh[i].audio, o); else await this.#readImage(fresh[i].image, o);
+        if (fresh[i].audio) await this.#readAudio(fresh[i].audio, o);
+        else if (fresh[i].video) await this.#readVideo(fresh[i].video, o);
+        else await this.#readImage(fresh[i].image, o);
         i++;
         continue;
       }
       let j = i;
-      while (j < fresh.length && j - i < m.chunk && typeof fresh[j] === 'number') j++;
+      const end = mark > i ? Math.min(mark, fresh.length) : fresh.length;
+      while (j < end && j - i < m.chunk && typeof fresh[j] === 'number') j++;
       await m.forward(fresh.slice(i, j));
       i = j;
     }
+    o.onRead?.({ reused: start, read: fresh.length });
     this.history = [...items];
 
     const out = [];
@@ -142,6 +163,12 @@ export class Keptsam {
     return text;
   }
 
+  /** A prompt as items: token ids, and media parts (one item each, compared by identity). */
+  items(prompt) {
+    return typeof prompt === 'string' ? this.tokenizer.encode(prompt)
+      : prompt.flatMap((p) => (typeof p === 'number' ? [p] : typeof p === 'string' ? this.tokenizer.encode(p) : [p]));
+  }
+
   /** Encodes 16 kHz mono audio (loading the audio encoder if needed) and feeds its embeddings to the model. */
   async #readAudio(pcm, o) {
     if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot hear audio.');
@@ -156,6 +183,58 @@ export class Keptsam {
       for (let i = 0; i < tokens; i += this.model.chunk) await this.model.forwardEmbeds(buf, i, Math.min(this.model.chunk, tokens - i));
     } finally { this.gpu.free(buf); }
     o.onStatus?.(`heard audio (${tokens} tokens, ${(pcm.length / 16000).toFixed(1)} s)`);
+  }
+
+  /**
+   * Reads a video from readVideo: for each pair of frames its timestamp, the pair (one temporal patch) and, for Omni,
+   * the pair's slice of the soundtrack. The soundtrack is encoded once as one clip and each pair takes its rows
+   * (llama.cpp MTMD_VIDEO_TEMPLATE_LFM3_OMNI). The vision encoder stays loaded for the whole clip.
+   */
+  async #readVideo(video, o) {
+    if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot watch video.');
+    const m = this.model;
+    const hasAudioEnc = this.encoders.gguf.tensors.some((t) => t.name.startsWith('a.blk.'));
+    const pcm = hasAudioEnc ? video.audio : null;
+    const gs = videoGroups(video.times, pcm?.length || 0);
+    let aud = null;
+    try {
+      if (pcm) {
+        if (!this.audio) { o.onStatus?.('loading audio encoder'); this.audio = await LFM3Audio.load(this.gpu, this.encoders.src, this.encoders.gguf); }
+        o.onStatus?.('listening to the soundtrack');
+        aud = await this.audio.encode(logMel(pcm));
+        if (!this.keepEncoders) { this.audio.free(); this.audio = null; }
+      }
+      if (!this.vision) { o.onStatus?.('loading vision encoder'); this.vision = await LFM3Vision.load(this.gpu, this.encoders.src, this.encoders.gguf); }
+      const f0 = video.frames[0];
+      const cfg = { ...this.vision.cfg, minPixels: 0, maxPixels: f0.width * f0.height };
+      let samples = 0, row = 0, tokens = 0;
+      for (let g = 0; g < gs.length; g++) {
+        if (o.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const grp = gs[g];
+        o.onStatus?.(`watching ${g + 1} of ${gs.length}`);
+        // <t seconds><|vision_start|> pair <|vision_end|>, then the pair's sound (llama.cpp wraps each pair like an image).
+        const ids = this.tokenizer.encode(grp.text + '<|vision_start|>'), close = this.tokenizer.encode('<|vision_end|>');
+        for (let i = 0; i < ids.length; i += m.chunk) await m.forward(ids.slice(i, i + m.chunk));
+        const a = patchify(video.frames[grp.frames[0]], cfg), b = patchify(video.frames[grp.frames[1]], cfg);
+        const { buf, tokens: n } = await this.vision.encode({ ...a, patches2: b.patches });
+        try {
+          for (let i = 0; i < n; i += m.chunk) await m.forwardEmbeds(buf, i, Math.min(m.chunk, n - i));
+        } finally { this.gpu.free(buf); }
+        await m.forward(close);
+        tokens += ids.length + n + close.length;
+        if (aud) {
+          samples += grp.audio[1] - grp.audio[0];
+          const end = g === gs.length - 1 ? aud.tokens : Math.min(aud.tokens, Math.max(row, roundEven(samples / 1280)));
+          for (let i = row; i < end; i += m.chunk) await m.forwardEmbeds(aud.buf, i, Math.min(m.chunk, end - i));
+          tokens += end - row;
+          row = end;
+        }
+      }
+      o.onStatus?.(`watched video (${video.frames.length} frames${aud ? ', with sound' : ''}, ${tokens} tokens)`);
+    } finally {
+      if (aud) this.gpu.free(aud.buf);
+      if (!this.keepEncoders && this.vision) { this.vision.free(); this.vision = null; }
+    }
   }
 
   /** Encodes an image (loading the vision encoder if needed) and feeds its embeddings to the model. */
@@ -194,8 +273,10 @@ export class Keptsam {
       `<|im_start|>system\nPerform TTS in ${language} using a ${voice} voice.<|im_end|>\n` +
       `<|im_start|>user\n${text}<|im_end|>\n<|im_start|>assistant\n<think></think><|audio_start|>`;
     const ids = this.tokenizer.encode(prompt);
+    // Speech runs in a sequence of its own, so the conversation's cache is still there afterwards.
+    const main = m.useSequence(this.#side());
     m.reset();
-    this.history = [];
+    try {
     for (let i = 0; i < ids.length; i += m.chunk) await m.forward(ids.slice(i, i + m.chunk));
     g.resetCodec();
     const ist = new Istft();
@@ -223,11 +304,41 @@ export class Keptsam {
       for (let s = 0; s < 6; s++) emit(ist.frame(st, s * 1282));
     }
     emit(ist.flush());
+    } finally { this.sideSeq.pos = m.pos; m.useSequence(main); }
     if (!this.keepEncoders) { g.free(); this.speechGen = null; }
     const out = new Float32Array(chunks.reduce((s, c) => s + c.length, 0));
     let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; }
     onStatus?.(`spoke ${(out.length / SPEECH_RATE).toFixed(1)} s`);
     return out;
+  }
+
+  /** The side sequence for speech and transcription (2,048 positions, made on first use). */
+  #side() {
+    this.sideSeq ||= this.model.newSequence(Math.min(2048, this.model.ctx));
+    return this.sideSeq;
+  }
+
+  /**
+   * Speech to text with the model's own hearing (Omni): what is said in 16 kHz mono `pcm`, as text. Runs in the
+   * side sequence, so the conversation's cache is kept.
+   * @param {Float32Array} pcm
+   * @param {{ maxTokens?: number, onToken?: (text: string) => void, onStatus?: (s: string) => void, signal?: AbortSignal }} [opts]
+   */
+  async transcribe(pcm, { maxTokens = 256, onToken, onStatus, signal } = {}) {
+    const m = this.model;
+    const main = m.useSequence(this.#side());
+    const keep = { history: this.history, snap: this.snap };
+    this.history = []; this.snap = null;
+    m.reset();
+    try {
+      const prompt = this.formatChat([{ role: 'user', content: [{ type: 'audio', audio: pcm }, 'Transcribe the audio exactly, word for word. Write only the words that are said.'] }], { thinking: false });
+      const text = await this.generate(prompt, { temperature: 0, repeatPenalty: 1, maxTokens, onToken, onStatus, signal });
+      return text.trim();
+    } finally {
+      this.sideSeq.pos = m.pos;
+      m.useSequence(main);
+      this.history = keep.history; this.snap = keep.snap;
+    }
   }
 
   /** Memory and timing report. */

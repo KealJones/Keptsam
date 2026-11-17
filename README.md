@@ -11,8 +11,8 @@ loaded the senses it is using right now.
 
 - First model: [LFM3 1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF) from Liquid AI, read straight from the
   official GGUF.
-- Next: [LFM3 Omni 2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF): text, images and voice in one model,
-  with each sense swapped in when needed.
+- [LFM3 Omni 2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF): text, pictures, video with its sound, audio in
+  and the model's own voice out, with each sense swapped in when needed.
 - GPU only (WebGPU). No build step: plain ES modules.
 
 Status: early, under construction. See [docs/design.md](docs/design.md) for how it works and why.

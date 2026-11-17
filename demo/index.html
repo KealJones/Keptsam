@@ -32,7 +32,7 @@
 <div class="row"><label style="flex:0">Context</label><input id="ctx" type="number" value="4096" step="1024" min="1024" style="width:110px;flex:0"></div>
 <div id="bar"><div></div></div>
 <div class="row"><textarea id="prompt" rows="3" placeholder="Say something">What's the capital of France? One sentence.</textarea></div>
-<div class="row" id="photoRow" hidden><label style="flex:0;white-space:nowrap"><input id="photo" type="file" accept="image/*,audio/*" style="width:auto"></label><button id="rec" style="flex:0;white-space:nowrap">🎤 Record</button><img id="thumb" alt="" style="max-height:56px;border-radius:6px;flex:0" hidden><span id="audioTag" class="tag" style="margin:0;flex:0;white-space:nowrap"></span>
+<div class="row" id="photoRow" hidden><label style="flex:0;white-space:nowrap"><input id="photo" type="file" accept="image/*,audio/*,video/*" style="width:auto"></label><button id="rec" style="flex:0;white-space:nowrap">🎤 Record</button><img id="thumb" alt="" style="max-height:56px;border-radius:6px;flex:0" hidden><span id="audioTag" class="tag" style="margin:0;flex:0;white-space:nowrap"></span>
   <select id="detail" style="width:auto;flex:0" title="Image detail: more detail is slower">
     <option value="65536">low detail (64 tokens)</option>
     <option value="147456">medium (144 tokens)</option>
@@ -59,7 +59,7 @@
 })();
 </script>
 <script type="module">
-import { Keptsam, decodeAudio, SPEECH_RATE } from '../src/index.js';
+import { Keptsam, decodeAudio, readVideo, SPEECH_RATE } from '../src/index.js';
 
 const $ = (id) => document.getElementById(id);
 const stats = (extra = '') => { $('stats').textContent = (llm ? JSON.stringify(llm.stats(), null, 1) : '') + extra; };
@@ -115,11 +115,18 @@ $('speakBtn').onclick = async () => {
   $('speakBtn').disabled = false;
 };
 
-let photo = null, audio = null;
+let photo = null, audio = null, video = null;
 const setAudio = (pcm) => { audio = pcm; $('audioTag').textContent = pcm ? `🔊 ${(pcm.length / 16000).toFixed(1)} s` : ''; };
 $('photo').onchange = async () => {
   const f = $('photo').files[0];
   if (f && f.type.startsWith('audio/')) { setAudio(await decodeAudio(f)); return; }
+  if (f && f.type.startsWith('video/')) {
+    // 2 frames a second, read in pairs; the detail setting caps each frame (low detail: 64 tokens a pair).
+    $('audioTag').textContent = '🎞 reading…';
+    video = await readVideo(f, { maxPixels: Math.min(Number($('detail').value), 256 * 256), maxFrames: 60, onStatus: (s) => { $('audioTag').textContent = '🎞 ' + s; } });
+    $('audioTag').textContent = `🎞 ${video.duration.toFixed(1)} s, ${video.frames.length} frames${video.audio ? ' + sound' : ''}`;
+    return;
+  }
   photo = f ? await createImageBitmap(f) : null;
   $('thumb').hidden = !f;
   if (f) $('thumb').src = URL.createObjectURL(f);
@@ -149,8 +156,9 @@ $('send').onclick = async () => {
   const parts = [];
   if (photo) parts.push({ type: 'image', image: photo });
   if (audio) parts.push({ type: 'audio', audio });
+  if (video) parts.push({ type: 'video', video });
   messages.push({ role: 'user', content: parts.length ? [...parts, text] : text });
-  photo = null; $('photo').value = ''; $('thumb').hidden = true; setAudio(null);
+  photo = null; video = null; $('photo').value = ''; $('thumb').hidden = true; setAudio(null);
   const out = $('out');
   out.textContent = '';
   let n = 0, t0 = 0, tFirst = 0;

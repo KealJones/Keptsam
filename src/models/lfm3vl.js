@@ -21,18 +21,10 @@ export class LFM3Vision {
     if (!tensors.length) throw new Error('this mmproj has no vision encoder');
     const v = new LFM3Vision(gpu, kv);
     v.w = await streamTensors(gpu, source, tensors, { tag: 'vision', onProgress });
-    // A still image fills both temporal slices of the patchifier, so its kernel is the sum of the two.
-    const p0 = v.w['v.patch_embd.weight'], p1 = v.w['v.patch_embd.weight.1'];
-    // GGUF dims (16, 16, 3, C): as a matmul it is C rows of 3·16·16 values.
-    p0.rows = v.C; p0.K = 3 * 16 * 16;
-    if (p1) {
-      const enc = gpu.device.createCommandEncoder();
-      const n = p0.rows * p0.K;
-      gpu.dispatch(enc, K.addInto, [new Uint32Array([n, 0, 0, 0]), p1.buf, p0.buf], [Math.min(Math.ceil(n / 256), 65535), Math.ceil(n / 256 / 65535)]);
-      await gpu.run(() => {}, enc);
-      gpu.free(p1.buf);
-      delete v.w['v.patch_embd.weight.1'];
-    }
+    // The patchifier has two temporal kernels: a video's frame pair goes through one each (W0·A + W1·B), and a still
+    // image fills both slices, i.e. the same patches go through both.
+    // GGUF dims (16, 16, 3, C): as a matmul each is C rows of 3·16·16 values.
+    for (const n of ['v.patch_embd.weight', 'v.patch_embd.weight.1']) if (v.w[n]) { v.w[n].rows = v.C; v.w[n].K = 3 * 16 * 16; }
     return v;
   }
 
@@ -76,25 +68,31 @@ export class LFM3Vision {
   }
 
   /**
-   * Encodes patches from image.js `patchify` into language-model embeddings.
+   * Encodes patches from image.js `patchify` into language-model embeddings. `patches2` is the second frame of a
+   * video's pair (same size); a still image leaves it out.
    * @returns {Promise<{ buf: GPUBuffer, tokens: number }>} buf holds [tokens, out] floats; free it with gpu.free.
    */
-  async encode({ patches, pw, ph }) {
+  async encode({ patches, patches2, pw, ph }) {
     const gpu = this.gpu, C = this.C, F = this.F, H = this.H, HK = this.HK, D = this.D;
     const N = pw * ph, NT = N / 4;
     const f = (n) => gpu.buffer(n * 4, 'vision-act');
     const a = {
-      px: f(N * 768), x: f(N * C), h: f(N * C), big: f(N * 3 * C), q: f(N * C), qn: f(N * C), k: f(N * HK * D), kn: f(N * HK * D),
+      px: f(N * 768), px2: f(N * 768), x: f(N * C), h: f(N * C), big: f(N * 3 * C), q: f(N * C), qn: f(N * C), k: f(N * HK * D), kn: f(N * HK * D),
       v: f(N * HK * D), att: f(N * C), y: f(N * C), g: f(N * F), u: f(N * F), S: f(QB * H * N),
       mrg: f(NT * 4 * C), m1: f(NT * 4 * C),
     };
     this.zero = f(4);
     const out = gpu.buffer(NT * this.out * 4, 'vision-out');
     gpu.device.queue.writeBuffer(a.px, 0, patches);
+    gpu.device.queue.writeBuffer(a.px2, 0, patches2 || patches);
     try {
       // Patchify + embedding norm.
       let enc = gpu.device.createCommandEncoder();
       this.#mm(enc, 'v.patch_embd.weight', a.px, a.h, N);
+      if (this.w['v.patch_embd.weight.1']) {
+        this.#mm(enc, 'v.patch_embd.weight.1', a.px2, a.y, N);
+        gpu.dispatch(enc, K.addInto, [this.#u([N * C]), a.y, a.h], this.#ew(N * C));
+      }
       this.#norm(enc, a.h, 'v.embedding_norm.weight', a.x, N, C);
       await this.#submit(enc);
       for (let i = 0; i < this.nLayer; i++) {

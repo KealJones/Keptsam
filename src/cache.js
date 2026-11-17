@@ -52,3 +52,50 @@ async function readUpTo(src, offset, length) {
 export async function clearCache(cacheName = 'keptsam-v1') {
   if (typeof caches !== 'undefined') await caches.delete(cacheName);
 }
+
+const sizeReq = (key) => new Request(`https://keptsam.cache/${encodeURIComponent(key)}/size`);
+const pieceReq = (key, i) => new Request(`https://keptsam.cache/${encodeURIComponent(key)}/${PIECE}/${i}`);
+
+/**
+ * Downloads a whole file into the cache, piece by piece (resumable: pieces already there are skipped), so a later
+ * load reads it from disk. `source` is a ByteSource for `url` (default: Range requests).
+ * @param {string} url
+ * @param {{ key?: string, cacheName?: string, source?: import('./gguf.js').ByteSource,
+ *   onProgress?: (done: number, total: number) => void, signal?: AbortSignal }} [opts]
+ */
+export async function cacheFile(url, { key = url, cacheName = 'keptsam-v1', source, onProgress, signal } = {}) {
+  const cache = await caches.open(cacheName);
+  const src = source || (await import('./gguf.js')).httpSource(url);
+  let size = Number(await (await cache.match(sizeReq(key)))?.text()) || 0;
+  if (!size) { await src.read(0, 1); size = src.size; }
+  if (!size) throw new Error(`${url}: the server didn't say how big the file is`);
+  const n = Math.ceil(size / PIECE);
+  let done = 0;
+  for (let i = 0; i < n; i++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const len = Math.min(PIECE, size - i * PIECE);
+    if (!(await cache.match(pieceReq(key, i)))) await cache.put(pieceReq(key, i), new Response(await readUpTo(src, i * PIECE, len)));
+    done += len;
+    onProgress?.(done, size);
+  }
+  await cache.put(sizeReq(key), new Response(String(size)));
+}
+
+/** How much of a file is cached: { size, stored, complete } (size 0 if it was never fully downloaded). */
+export async function cachedFileInfo(key, cacheName = 'keptsam-v1') {
+  if (typeof caches === 'undefined') return { size: 0, stored: 0, complete: false };
+  const cache = await caches.open(cacheName);
+  const size = Number(await (await cache.match(sizeReq(key)))?.text()) || 0;
+  if (!size) return { size: 0, stored: 0, complete: false };
+  let stored = 0;
+  for (let i = 0; i < Math.ceil(size / PIECE); i++) if (await cache.match(pieceReq(key, i))) stored += Math.min(PIECE, size - i * PIECE);
+  return { size, stored, complete: stored === size };
+}
+
+/** Deletes one file's pieces from the cache. */
+export async function removeCachedFile(key, cacheName = 'keptsam-v1') {
+  if (typeof caches === 'undefined') return;
+  const cache = await caches.open(cacheName);
+  const prefix = `https://keptsam.cache/${encodeURIComponent(key)}/`;
+  for (const req of await cache.keys()) if (req.url.startsWith(prefix)) await cache.delete(req);
+}

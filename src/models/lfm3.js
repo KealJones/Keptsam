@@ -8,6 +8,7 @@ import * as K from '../kernels.js';
 const MM = {}; // matmul source by tokens-per-pass
 
 export class LFM3 {
+  static seqs = 0;
   /**
    * Streams an LFM3 GGUF into GPU memory.
    * @param {import('../gpu.js').Gpu} gpu
@@ -74,20 +75,91 @@ export class LFM3 {
       tok: gpu.buffer(T * 4, 'activations'), ones: f(64),
     };
     gpu.device.queue.writeBuffer(this.a.ones, 0, new Float32Array(64).fill(1));
-    this.cache = this.layers.map((L) => {
+    this.cache = this.#allocCache(this.ctx);
+    this.seq = 0;
+  }
+
+  // Per-layer state of one sequence: KV (global layers: ctx slots; sliding-window layers: a ring) or conv state.
+  #allocCache(ctx) {
+    const f = (n, tag) => this.gpu.buffer(n * 4, tag);
+    return this.layers.map((L) => {
       if (L.attn) {
-        const slots = L.swa ? this.swaSlots : this.ctx;
-        return { slots, k: f(slots * 512, 'kv'), v: f(slots * 512, 'kv') };
+        const slots = L.swa ? this.swaSlots : ctx;
+        return { slots, swa: L.swa, k: f(slots * 512, 'kv'), v: f(slots * 512, 'kv') };
       }
-      return { state: f(6 * E, 'conv-state') };
+      return { state: f(6 * this.nEmbd, 'conv-state') };
     });
+  }
+
+  /**
+   * A second conversation state (its own KV and conv state, `ctx` positions) to switch to with useSequence, e.g.
+   * for speech or a transcription, so the main conversation's cache survives it. Activations are shared.
+   */
+  newSequence(ctx) {
+    if (ctx > this.ctx) throw new Error('a side sequence can be at most as long as the model\'s context');
+    const s = { id: ++LFM3.seqs, cache: this.#allocCache(ctx), ctx, pos: 0 };
+    this.#zeroConv(s.cache);
+    return s;
+  }
+
+  /** Switches to sequence `s` (from newSequence, or one returned here) and returns the one that was in use. */
+  useSequence(s) {
+    const was = { id: this.seq, cache: this.cache, ctx: this.ctx, pos: this.pos };
+    Object.assign(this, { seq: s.id, cache: s.cache, ctx: s.ctx, pos: s.pos });
+    return was;
+  }
+
+  /** Frees a sequence from newSequence (not the one in use). */
+  freeSequence(s) {
+    for (const c of s.cache) for (const b of [c.k, c.v, c.state]) if (b) this.gpu.free(b);
+  }
+
+  /**
+   * Remembers the state at the current position, to come back to with restore(): the conv states and the
+   * sliding-window rings (later tokens overwrite those); global KV slots up to here are never written again.
+   */
+  async snapshot() {
+    const gpu = this.gpu;
+    if (!this.snap || this.snap.seq !== this.seq) {
+      if (this.snap) for (const b of this.snap.bufs) if (b) gpu.free(b);
+      const bufs = this.cache.map((c) => (c.state ? gpu.buffer(c.state.size, 'kv-snapshot')
+        : c.swa ? [gpu.buffer(c.k.size, 'kv-snapshot'), gpu.buffer(c.v.size, 'kv-snapshot')] : [])).flat();
+      this.snap = { seq: this.seq, bufs, pos: 0 };
+    }
+    this.#copyState(true);
+    this.snap.pos = this.pos;
+    await gpu.device.queue.onSubmittedWorkDone();
+  }
+
+  /** Goes back to the last snapshot() of this sequence. */
+  async restore() {
+    if (!this.snap || this.snap.seq !== this.seq) throw new Error('no snapshot of this sequence');
+    this.#copyState(false);
+    this.pos = this.snap.pos;
+    await this.gpu.device.queue.onSubmittedWorkDone();
+  }
+
+  #copyState(save) {
+    const enc = this.gpu.device.createCommandEncoder();
+    let j = 0;
+    for (const c of this.cache) {
+      for (const b of c.state ? [c.state] : c.swa ? [c.k, c.v] : []) {
+        const s = this.snap.bufs[j++];
+        if (save) enc.copyBufferToBuffer(b, 0, s, 0, b.size); else enc.copyBufferToBuffer(s, 0, b, 0, b.size);
+      }
+    }
+    this.gpu.device.queue.submit([enc.finish()]);
+  }
+
+  #zeroConv(cache) {
+    const q = this.gpu.device.queue;
+    for (const c of cache) if (c.state) q.writeBuffer(c.state, 0, new Float32Array(6 * this.nEmbd));
   }
 
   /** Forgets the conversation (positions, KV, conv state). */
   reset() {
     this.pos = 0;
-    const q = this.gpu.device.queue;
-    for (const c of this.cache) if (c.state) q.writeBuffer(c.state, 0, new Float32Array(6 * this.nEmbd));
+    this.#zeroConv(this.cache);
   }
 
   // Uniform values for one dispatch (they go into the submit's uniform slots, see Gpu.dispatch).
@@ -141,7 +213,7 @@ export class LFM3 {
     if (est === undefined) est = Math.max(20, ...[...this.est].filter(([b]) => b < bucket).map(([, v]) => v));
     const per = Math.max(1, Math.min(this.nLayer, Math.floor(this.submitBudgetMs / (est * T))));
     // Decode steps repeat the same dispatches on the same buffers, so their bind groups are reused.
-    gpu.beginPlan(T === 1 ? 'lfm3-decode' : null);
+    gpu.beginPlan(T === 1 ? `lfm3-decode:${this.seq}` : null);
     let enc = gpu.device.createCommandEncoder();
     if (tokens) {
       gpu.device.queue.writeBuffer(a.tok, 0, new Uint32Array(tokens));
