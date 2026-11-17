@@ -69,7 +69,13 @@ try {
   } else {
     const { Wllama } = await import(WLLAMA + 'index.js');
     const w = new Wllama({ default: WLLAMA + 'wasm/wllama.wasm' }); // the package's wasm-from-cdn.js isn't published
-    w.setCompat('default', 'safari'); // wllama's own Safari path
+    // On iOS Safari 27.2 wllama's check (new WebAssembly.Memory({ address: 'i64' })) passes but its wasm then fails
+    // to compile ("Memory64 is not enabled"), so it never picks its Safari build. Force that build unless ?compat=0.
+    if (qs.get('compat') !== '0') {
+      const C = 'https://cdn.jsdelivr.net/npm/@wllama/wllama-compat@3.8.1/wasm/';
+      w.getWorkerResources = () => ({ wasmPath: C + 'wllama.wasm', jsPath: C + 'wllama.js', compat: true });
+    }
+    result.compat = qs.get('compat') !== '0';
     result.webgpu = w.isSupportWebGPU();
     // Tokenizer only (reads the GGUF header, a few MB, not the weights) so the prompt text matches Keptsam's.
     const hdr = await (await import(base + 'gguf.js')).readGGUF(await kx.cachedSource(kx.httpSource(MODEL), { key: MODEL }));
