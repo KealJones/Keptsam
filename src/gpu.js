@@ -115,12 +115,19 @@ export class Gpu {
       }
     }
     const bg = hit.bg;
-    const pass = enc.beginComputePass();
+    // All dispatches recorded into one encoder share one compute pass (WebGPU still orders their reads and
+    // writes); a pass per dispatch costs real time in Safari's Metal backend.
+    if (this.passEnc !== enc) { this.endPass(); this.passEnc = enc; this.pass = enc.beginComputePass(); }
+    const pass = this.pass;
     pass.setPipeline(p);
     pass.setBindGroup(0, bg);
     const [x, y = 1, z = 1] = Array.isArray(groups) ? groups : [groups];
     pass.dispatchWorkgroups(x, y, z);
-    pass.end();
+  }
+
+  /** Ends the open compute pass; call before recording copies into the same encoder, or finishing it. */
+  endPass() {
+    if (this.pass) { this.pass.end(); this.pass = null; this.passEnc = null; }
   }
 
   /** Submits `record(encoder)` as one command buffer and waits for the GPU, timing it. */
@@ -133,6 +140,7 @@ export class Gpu {
 
   async run(record, enc = this.device.createCommandEncoder()) {
     record(enc);
+    this.endPass();
     const t0 = performance.now();
     this.flush();
     this.device.queue.submit([enc.finish()]);

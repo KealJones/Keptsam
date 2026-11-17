@@ -109,4 +109,16 @@ Lessons:
   ≈11.7 ms at 64), so one estimate per batch size.
 - GitHub Pages lets Safari cache modules for 10 minutes: after a deploy, a reload can still run old code.
 
-Next: a tiled matmul for prompt reading (the biggest gap), and moving sampling to the GPU (decode overhead).
+### After the speed pass (same phone, LFM3 1.7B, 256-token prompt, 64 generated tokens)
+
+| | before | after |
+|---|---|---|
+| Prompt reading | 3–6 tok/s | **51 tok/s** (tiled 64×32 matmul) |
+| Writing | 8 tok/s | **12.6 tok/s** |
+| Per generated token | ~125 ms | 79.7 ms: 2.9 ms JS recording + 76.8 ms GPU, + 2.6 ms GPU top-k readback |
+| Single-token matmul A/B | one workgroup per row: 100.6 ms/token | 8 rows per workgroup: 76.6 ms/token |
+
+What made the difference: uniforms in slots of one buffer written once per submit (instead of a GPUBuffer per
+dispatch), bind groups reused every decode step, GPU top-k (64 KB read back instead of 512 KB), and the tiled
+prompt matmul. The rest of a decode step is GPU time: about 13 GB/s of weights read, so the kernels themselves
+are the next lever.
