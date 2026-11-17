@@ -92,7 +92,7 @@ try {
   log('done', mem());
   bar('done: you can go back to the Claude app now 👋', '#1f8a4c');
 } catch (e) {
-  results.error = String(e && (e.stack || e.message) || e);
+  results.error = String(e && ((e.message || '') + '\n' + (e.stack || '')) || e);
   log('ERROR', results.error);
   bar('stopped with an error: you can go back to the Claude app', '#b3261e');
 }

@@ -276,11 +276,11 @@ export class Keptsam {
     // Speech runs in a sequence of its own, so the conversation's cache is still there afterwards.
     const main = m.useSequence(this.#side());
     m.reset();
+    const chunks = [];
     try {
     for (let i = 0; i < ids.length; i += m.chunk) await m.forward(ids.slice(i, i + m.chunk));
     g.resetCodec();
     const ist = new Istft();
-    const chunks = [];
     const emit = (pcm) => { if (pcm.length) { chunks.push(pcm); onAudio?.(pcm); } };
     const recent = Array.from({ length: n }, () => []);
     onStatus?.('speaking');
