@@ -60,13 +60,14 @@ const pieceReq = (key, i) => new Request(`https://keptsam.cache/${encodeURICompo
  * Downloads a whole file into the cache, piece by piece (resumable: pieces already there are skipped), so a later
  * load reads it from disk. `source` is a ByteSource for `url` (default: Range requests).
  * @param {string} url
- * @param {{ key?: string, cacheName?: string, source?: import('./gguf.js').ByteSource,
+ * `size`, when the caller knows it, saves asking the server (pieces a load already cached then need no network at all).
+ * @param {{ key?: string, cacheName?: string, source?: import('./gguf.js').ByteSource, size?: number,
  *   onProgress?: (done: number, total: number) => void, signal?: AbortSignal }} [opts]
  */
-export async function cacheFile(url, { key = url, cacheName = 'keptsam-v1', source, onProgress, signal } = {}) {
+export async function cacheFile(url, { key = url, cacheName = 'keptsam-v1', source, size: known = 0, onProgress, signal } = {}) {
   const cache = await caches.open(cacheName);
   const src = source || (await import('./gguf.js')).httpSource(url);
-  let size = Number(await (await cache.match(sizeReq(key)))?.text()) || 0;
+  let size = Number(await (await cache.match(sizeReq(key)))?.text()) || known || 0;
   if (!size) { await src.read(0, 1); size = src.size; }
   if (!size) throw new Error(`${url}: the server didn't say how big the file is`);
   const n = Math.ceil(size / PIECE);
@@ -81,11 +82,14 @@ export async function cacheFile(url, { key = url, cacheName = 'keptsam-v1', sour
   await cache.put(sizeReq(key), new Response(String(size)));
 }
 
-/** How much of a file is cached: { size, stored, complete } (size 0 if it was never fully downloaded). */
-export async function cachedFileInfo(key, cacheName = 'keptsam-v1') {
+/**
+ * How much of a file is cached: { size, stored, complete } (size 0 if it was never fully downloaded and no `size` is
+ * given). Pieces cached by a load (cachedSource) carry no size record, so they count only when the caller says the size.
+ */
+export async function cachedFileInfo(key, cacheName = 'keptsam-v1', { size: known = 0 } = {}) {
   if (typeof caches === 'undefined') return { size: 0, stored: 0, complete: false };
   const cache = await caches.open(cacheName);
-  const size = Number(await (await cache.match(sizeReq(key)))?.text()) || 0;
+  const size = Number(await (await cache.match(sizeReq(key)))?.text()) || known || 0;
   if (!size) return { size: 0, stored: 0, complete: false };
   let stored = 0;
   for (let i = 0; i < Math.ceil(size / PIECE); i++) if (await cache.match(pieceReq(key, i))) stored += Math.min(PIECE, size - i * PIECE);

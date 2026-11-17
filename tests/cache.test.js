@@ -10,7 +10,7 @@ globalThis.caches = {
     put: async (r, res) => { store.set(keyOf(r), new Uint8Array(await res.arrayBuffer())); },
   }),
 };
-const { cachedSource } = await import('../src/cache.js');
+const { cachedSource, cacheFile, cachedFileInfo } = await import('../src/cache.js');
 
 test('cached reads return the right bytes across 16 MB pieces, from network and from cache', async () => {
   const file = new Uint8Array(40 << 20);
@@ -24,4 +24,23 @@ test('cached reads return the right bytes across 16 MB pieces, from network and 
     for (const [o, n] of ranges) assert.deepEqual(await c.read(o, n), file.subarray(o, o + n), `${pass} ${o}+${n}`);
   }
   assert.ok(fetched <= 40 << 20, `downloaded ${fetched} bytes for a 40 MB file`);
+});
+
+test('pieces a load cached count once the size is known, and finishing them needs no network', async () => {
+  store.clear();
+  const size = (32 << 20) + 5;
+  const file = new Uint8Array(size).map((_, i) => i & 255);
+  let reads = 0;
+  const src = { name: 'g', read: async (o, n) => { reads++; return file.slice(o, Math.min(o + n, size)); } };
+  const key = 'https://example.com/g.gguf';
+  const c = await cachedSource(src, { key, size });
+  await c.read(0, size);                                   // a load streams the whole file through the cache
+  assert.deepEqual(await cachedFileInfo(key), { size: 0, stored: 0, complete: false }, 'no size record: unknown');
+  assert.deepEqual(await cachedFileInfo(key, 'keptsam-v1', { size }), { size, stored: size, complete: true });
+  reads = 0;
+  const seen = [];
+  await cacheFile(key, { source: src, size, onProgress: (d) => seen.push(d) });
+  assert.equal(reads, 0, 'every piece was there and the size was given: nothing fetched');
+  assert.equal(seen.at(-1), size);
+  assert.deepEqual(await cachedFileInfo(key), { size, stored: size, complete: true }, 'the size record is written');
 });
