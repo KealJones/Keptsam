@@ -444,9 +444,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   V[base + i + 32u] = a * s + b * c;
 }`;
 
-/** Non-causal scores for a block of queries: S[(q·H + h), j] = Q[q0+q, h] · K[j, h / (H/HK)] · scale. */
+/**
+ * Scores for a block of queries: S[(q·H + h), j] = Q[q0+q, h] · K[j, h / (H/HK)] · scale.
+ * window 0: every key (non-causal). window w > 0: causal, keys within the last w positions.
+ */
 export const encScores = /* wgsl */ `
-struct P { N: u32, q0: u32, H: u32, HK: u32, D: u32, scale: f32, pad0: u32, pad1: u32 }
+struct P { N: u32, q0: u32, H: u32, HK: u32, D: u32, scale: f32, window: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> Q: array<f32>;
 @group(0) @binding(2) var<storage, read> K: array<f32>;
@@ -458,6 +461,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let q = qh / p.H; let h = qh % p.H;
   let qb = ((p.q0 + q) * p.H + h) * p.D;
   let kb = (j * p.HK + h / (p.H / p.HK)) * p.D;
+  let qa = p.q0 + q;
+  if (p.window > 0u && (j > qa || qa - j >= p.window)) { S[qh * p.N + j] = -3.0e38; return; }
   var acc = 0.0;
   for (var d = 0u; d < p.D; d++) { acc += Q[qb + d] * K[kb + d]; }
   S[qh * p.N + j] = acc * p.scale;
@@ -670,4 +675,108 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     workgroupBarrier();
   }
   if (lane == 0u && row < p.rows) { Y[p.yOff + row] = red[li]; }
+}`;
+
+
+// ───────────── LFM3 audio encoder ─────────────
+
+/**
+ * Stride-2 3×3 conv over [channel][freq][time] (time fastest): one zero column before the clip and one after it
+ * in time, one zero row on each side in frequency. depthwise: channel c reads input channel c; otherwise all
+ * output channels read the single input channel. Y = silu?(conv + bias).
+ */
+export const convDown = /* wgsl */ `
+struct P { Tin: u32, Fin: u32, Tout: u32, Fout: u32, C: u32, depthwise: u32, silu: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let to = gid.x; let fo = gid.y % p.Fout; let c = gid.y / p.Fout;
+  if (to >= p.Tout || c >= p.C) { return; }
+  let ci = select(0u, c, p.depthwise == 1u);
+  var acc = b[c];
+  for (var kf = 0u; kf < 3u; kf++) {
+    let fi = i32(2u * fo + kf) - 1;
+    if (fi < 0 || fi >= i32(p.Fin)) { continue; }
+    for (var kt = 0u; kt < 3u; kt++) {
+      let ti = i32(2u * to + kt) - 1;
+      if (ti < 0 || ti >= i32(p.Tin)) { continue; }
+      acc += w[c * 9u + kf * 3u + kt] * X[(ci * p.Fin + u32(fi)) * p.Tin + u32(ti)];
+    }
+  }
+  if (p.silu == 1u) { acc = acc / (1.0 + exp(-acc)); }
+  Y[(c * p.Fout + fo) * p.Tout + to] = acc;
+}`;
+
+/** 1×1 conv over channels for [channel][pixels]: Y[co][q] = silu(Σ_ci w[co, ci] · X[ci][q] + b[co]). */
+export const pointwise = /* wgsl */ `
+struct P { C: u32, Q: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read> b: array<f32>;
+@group(0) @binding(4) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let q = gid.x; let co = gid.y;
+  if (q >= p.Q) { return; }
+  var acc = b[co];
+  for (var ci = 0u; ci < p.C; ci++) { acc += w[co * p.C + ci] * X[ci * p.Q + q]; }
+  Y[co * p.Q + q] = acc / (1.0 + exp(-acc));
+}`;
+
+/** [channel][freq][time] → rows per time step: Y[t, c·F + f] = X[c][f][t]. */
+export const flattenCFT = /* wgsl */ `
+struct P { C: u32, F: u32, T: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = wid.x;
+  for (var k = lid.x; k < p.C * p.F; k += 256u) { Y[t * p.C * p.F + k] = X[k * p.T + t]; }
+}`;
+
+/** Causal short conv of width W over T tokens from a zero state: Y = C ⊙ conv(B ⊙ X). Channels N, BCX rows 3N. */
+export const shortconvFresh = (W) => /* wgsl */ `
+struct P { T: u32, N: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> BCX: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let ch = gid.x; let t = gid.y;
+  if (ch >= p.N) { return; }
+  var acc = 0.0;
+  for (var k = 0u; k < ${W}u; k++) {
+    let ti = i32(t) - i32(${W - 1}u) + i32(k);
+    if (ti >= 0) {
+      let row = u32(ti) * 3u * p.N;
+      acc += BCX[row + ch] * BCX[row + 2u * p.N + ch] * w[ch * ${W}u + k];
+    }
+  }
+  Y[t * p.N + ch] = BCX[t * 3u * p.N + p.N + ch] * acc;
+}`;
+
+/** NeoX RoPE in place on [T, H, D] at positions pos0 + t: pairs (i, i + D/2), θ_i = pos · base^(-2i/D). */
+export const ropeN = /* wgsl */ `
+struct P { H: u32, pos0: u32, base: f32, D: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> V: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = wid.x / p.H;
+  let base = wid.x * p.D;
+  let half = p.D / 2u;
+  for (var i = lid.x; i < half; i += 64u) {
+    let theta = f32(p.pos0 + t) * pow(p.base, -2.0 * f32(i) / f32(p.D));
+    let c = cos(theta); let s = sin(theta);
+    let a = V[base + i]; let b = V[base + i + half];
+    V[base + i] = a * c - b * s;
+    V[base + i + half] = a * s + b * c;
+  }
 }`;

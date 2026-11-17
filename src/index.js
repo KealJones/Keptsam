@@ -10,9 +10,11 @@ import { cachedSource, clearCache } from './cache.js';
 import { readGGUF } from './gguf.js';
 import { LFM3 } from './models/lfm3.js';
 import { LFM3Vision } from './models/lfm3vl.js';
+import { LFM3Audio } from './models/lfm3a.js';
 import { patchify } from './image.js';
+import { logMel, decodeAudio, parseWav } from './audio.js';
 
-export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, cachedSource, clearCache, patchify };
+export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, LFM3Audio, cachedSource, clearCache, patchify, logMel, decodeAudio, parseWav };
 
 export class Keptsam {
   /**
@@ -54,8 +56,9 @@ export class Keptsam {
 
   /**
    * Formats messages with the model's chat format (system/user/assistant; tools are left to the caller).
-   * Content is a string, or an array of parts: strings, { type: 'text', text }, { type: 'image', image }.
-   * Returns a string, or (when there are images) an array of strings and { image } parts.
+   * Content is a string, or an array of parts: strings, { type: 'text', text }, { type: 'image', image },
+   * { type: 'audio', audio } (16 kHz mono Float32Array; see decodeAudio).
+   * Returns a string, or (with media) an array of strings and { image } / { audio } parts.
    * @param {{ role: string, content: string | any[] }[]} messages
    */
   formatChat(messages, { thinking = true } = {}) {
@@ -66,6 +69,7 @@ export class Keptsam {
       for (const p of c) {
         if (typeof p === 'string') push(p);
         else if (p.type === 'image') { push('<|vision_start|>'); push({ image: p.image }); push('<|vision_end|>'); }
+        else if (p.type === 'audio') { push('<|vision_start|>'); push({ audio: p.audio }); push('<|vision_end|>'); }
         else push(String(p.text ?? ''));
       }
     };
@@ -106,7 +110,11 @@ export class Keptsam {
     const fresh = items.slice(this.history.length);
     for (let i = 0; i < fresh.length;) {
       if (o.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (typeof fresh[i] !== 'number') { await this.#readImage(fresh[i].image, o); i++; continue; }
+      if (typeof fresh[i] !== 'number') {
+        if (fresh[i].audio) await this.#readAudio(fresh[i].audio, o); else await this.#readImage(fresh[i].image, o);
+        i++;
+        continue;
+      }
       let j = i;
       while (j < fresh.length && j - i < m.chunk && typeof fresh[j] === 'number') j++;
       await m.forward(fresh.slice(i, j));
@@ -130,6 +138,22 @@ export class Keptsam {
       this.history.push(id);
     }
     return text;
+  }
+
+  /** Encodes 16 kHz mono audio (loading the audio encoder if needed) and feeds its embeddings to the model. */
+  async #readAudio(pcm, o) {
+    if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot hear audio.');
+    if (!this.audio) {
+      o.onStatus?.('loading audio encoder');
+      this.audio = await LFM3Audio.load(this.gpu, this.encoders.src, this.encoders.gguf);
+    }
+    o.onStatus?.('listening');
+    const { buf, tokens } = await this.audio.encode(logMel(pcm));
+    if (!this.keepEncoders) { this.audio.free(); this.audio = null; }
+    try {
+      for (let i = 0; i < tokens; i += this.model.chunk) await this.model.forwardEmbeds(buf, i, Math.min(this.model.chunk, tokens - i));
+    } finally { this.gpu.free(buf); }
+    o.onStatus?.(`heard audio (${tokens} tokens, ${(pcm.length / 16000).toFixed(1)} s)`);
   }
 
   /** Encodes an image (loading the vision encoder if needed) and feeds its embeddings to the model. */

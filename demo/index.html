@@ -25,14 +25,14 @@
 <div class="row">
   <select id="model">
     <option value="https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf">LFM3 1.7B QAD Q4_0 (1.05 GB)</option>
-    <option value="https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/LFM3-Omni-2B-Q4_0.gguf" data-mmproj="https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/mmproj-LFM3-Omni-2B-Q8_0.gguf">LFM3 Omni 2B Q4_0 + vision (1.05 GB + 0.2 GB per photo)</option>
+    <option value="https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/LFM3-Omni-2B-Q4_0.gguf" data-mmproj="https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/mmproj-LFM3-Omni-2B-Q8_0.gguf">LFM3 Omni 2B Q4_0 + vision + hearing (1.05 GB; encoders load per use)</option>
   </select>
   <button id="load">Load</button>
 </div>
 <div class="row"><label style="flex:0">Context</label><input id="ctx" type="number" value="4096" step="1024" min="1024" style="width:110px;flex:0"></div>
 <div id="bar"><div></div></div>
 <div class="row"><textarea id="prompt" rows="3" placeholder="Say something">What's the capital of France? One sentence.</textarea></div>
-<div class="row" id="photoRow" hidden><label style="flex:0;white-space:nowrap"><input id="photo" type="file" accept="image/*" style="width:auto"></label><img id="thumb" alt="" style="max-height:56px;border-radius:6px;flex:0" hidden>
+<div class="row" id="photoRow" hidden><label style="flex:0;white-space:nowrap"><input id="photo" type="file" accept="image/*,audio/*" style="width:auto"></label><button id="rec" style="flex:0;white-space:nowrap">🎤 Record</button><img id="thumb" alt="" style="max-height:56px;border-radius:6px;flex:0" hidden><span id="audioTag" class="tag" style="margin:0;flex:0;white-space:nowrap"></span>
   <select id="detail" style="width:auto;flex:0" title="Image detail: more detail is slower">
     <option value="65536">low detail (64 tokens)</option>
     <option value="147456">medium (144 tokens)</option>
@@ -59,7 +59,7 @@
 })();
 </script>
 <script type="module">
-import { Keptsam } from '../src/index.js';
+import { Keptsam, decodeAudio } from '../src/index.js';
 
 const $ = (id) => document.getElementById(id);
 const stats = (extra = '') => { $('stats').textContent = (llm ? JSON.stringify(llm.stats(), null, 1) : '') + extra; };
@@ -86,12 +86,30 @@ $('load').onclick = async () => {
   }
 };
 
-let photo = null;
+let photo = null, audio = null;
+const setAudio = (pcm) => { audio = pcm; $('audioTag').textContent = pcm ? `🔊 ${(pcm.length / 16000).toFixed(1)} s` : ''; };
 $('photo').onchange = async () => {
   const f = $('photo').files[0];
+  if (f && f.type.startsWith('audio/')) { setAudio(await decodeAudio(f)); return; }
   photo = f ? await createImageBitmap(f) : null;
   $('thumb').hidden = !f;
   if (f) $('thumb').src = URL.createObjectURL(f);
+};
+let recorder = null;
+$('rec').onclick = async () => {
+  if (recorder) { recorder.stop(); return; }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    recorder = null;
+    $('rec').textContent = '🎤 Record';
+    setAudio(await decodeAudio(new Blob(chunks, { type: chunks[0]?.type })));
+  };
+  recorder.start();
+  $('rec').textContent = '⏹ Stop';
 };
 
 $('send').onclick = async () => {
@@ -99,8 +117,11 @@ $('send').onclick = async () => {
   if (!text) return;
   $('send').disabled = true;
   if (llm) llm.imageMaxPixels = Number($('detail').value);
-  messages.push({ role: 'user', content: photo ? [{ type: 'image', image: photo }, text] : text });
-  photo = null; $('photo').value = ''; $('thumb').hidden = true;
+  const parts = [];
+  if (photo) parts.push({ type: 'image', image: photo });
+  if (audio) parts.push({ type: 'audio', audio });
+  messages.push({ role: 'user', content: parts.length ? [...parts, text] : text });
+  photo = null; $('photo').value = ''; $('thumb').hidden = true; setAudio(null);
   const out = $('out');
   out.textContent = '';
   let n = 0, t0 = 0, tFirst = 0;
