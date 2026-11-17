@@ -29,7 +29,17 @@ const stage = (s, extra = {}) => {
   all.push({ run, stage: s, t: Math.round(performance.now()), ...extra });
   try { localStorage.setItem('vs-wllama', JSON.stringify(all.slice(-200))); } catch {}
 };
-try { const prev = JSON.parse(localStorage.getItem('vs-wllama') || '[]'); if (prev.length) log('previous runs (last 6 stages):\n' + prev.slice(-6).map((e) => JSON.stringify(e)).join('\n')); } catch {}
+let prev = [];
+try { prev = JSON.parse(localStorage.getItem('vs-wllama') || '[]'); if (prev.length) log('previous runs (last 6 stages):\n' + prev.slice(-6).map((e) => JSON.stringify(e)).join('\n')); } catch {}
+// Safari reloads a tab iOS killed; without this a run that kills the tab restarts forever. ?again=1 overrides.
+const last = prev.at(-1);
+if (performance.getEntriesByType('navigation')[0]?.type === 'reload' && last?.run.startsWith(run.split(' @')[0] + ' @')
+    && !['done', 'error', 'died'].includes(last.stage) && !qs.get('again')) {
+  stage('died', { during: last.stage, deadRun: last.run });
+  log(`previous run died during "${last.stage}" (tab killed); not restarting. Add &again=1 to retry.`);
+  window.__result = { ok: false, died: last.stage };
+  throw new Error('previous run died');
+}
 
 // Shared prompt: exactly nPrompt tokens of the same text, built with Keptsam's tokenizer (identical to llama.cpp's
 // for this model: tests/tokenizer.test.js), decoded back to a string so both engines get the same text.
