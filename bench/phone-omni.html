@@ -15,7 +15,7 @@
 // greedy, compared with llama.cpp's first 8 tokens. ?sha=<commit> loads the engine pinned via jsDelivr.
 const qs = new URLSearchParams(location.search);
 const base = qs.get('sha') ? `https://cdn.jsdelivr.net/gh/KealJones/Keptsam@${qs.get('sha')}/src/` : '../src/';
-const { Keptsam, parseWav } = await import(base + 'index.js');
+const { Keptsam, parseWav, wav } = await import(base + 'index.js');
 const HF = 'https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/';
 const kind = qs.get('kind') || 'audio';
 const CASES = {
@@ -32,6 +32,25 @@ try {
   });
   window.keptsam = llm;
   log('loaded in', ((performance.now() - t0) / 1000).toFixed(1), 's', JSON.stringify(llm.stats()));
+  if (kind === 'speak') {
+    const text = qs.get('text') || 'Hey Keal! This is Keptsam, speaking from your iPhone, on the GPU, with no server at all.';
+    const t1 = performance.now();
+    let first = 0;
+    const pcm = await llm.speak(text, {
+      onAudio: () => { if (!first) first = performance.now(); },
+      onStatus: (s) => { bar(s + '…'); log(s, ((performance.now() - t1) / 1000).toFixed(2) + 's', JSON.stringify(llm.stats())); },
+    });
+    const secs = (performance.now() - t1) / 1000, audioSecs = pcm.length / 24000;
+    const r = `spoke ${audioSecs.toFixed(1)} s of audio in ${secs.toFixed(1)} s (${(audioSecs / secs).toFixed(2)}× real time), first audio after ${((first - t1) / 1000).toFixed(1)} s`;
+    log(r, JSON.stringify(llm.stats()));
+    const a = document.createElement('audio');
+    a.controls = true; a.src = URL.createObjectURL(new Blob([wav(pcm)], { type: 'audio/wav' }));
+    a.style.cssText = 'width:100%;margin:8px 0';
+    document.getElementById('kbar').after(a);
+    bar('done: tap ▶ to hear it');
+    window.__result = { ok: pcm.length > 0, r };
+    throw 'done';
+  }
   let part;
   if (kind === 'image') {
     const bmp = await createImageBitmap(await (await fetch('fixtures/test256.png')).blob());
@@ -54,5 +73,5 @@ try {
   log('first token', ((tFirst - t1) / 1000).toFixed(2), 's,', (ids.length / ((performance.now() - tFirst) / 1000)).toFixed(1), 'tok/s', JSON.stringify(llm.stats()));
   bar(match ? `done (${kind}), matches llama.cpp ✓` : `done (${kind}), differs from llama.cpp (see log)`);
   window.__result = { ok: match, text };
-} catch (e) { bar('error: ' + e.message); log('ERROR', e.stack || e); window.__result = { ok: false, error: String(e) }; }
+} catch (e) { if (e === 'done') throw e; bar('error: ' + e.message); log('ERROR', e.stack || e); window.__result = { ok: false, error: String(e) }; }
 </script>
