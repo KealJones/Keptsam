@@ -38,7 +38,7 @@
     <option value="147456">medium (144 tokens)</option>
     <option value="262144" selected>high (256 tokens)</option>
   </select></div>
-<div class="row"><label style="flex:0;white-space:nowrap"><input id="thinking" type="checkbox" checked style="width:auto"> thinking</label><span id="status" class="tag" style="margin:0"></span><button id="send" disabled>Send</button></div>
+<div class="row"><label style="flex:0;white-space:nowrap"><input id="thinking" type="checkbox" checked style="width:auto"> thinking</label><label id="voiceRow" hidden style="flex:0;white-space:nowrap"><input id="aloud" type="checkbox" style="width:auto"> say replies out loud</label><span id="status" class="tag" style="margin:0"></span><button id="speakBtn" hidden>🔊 Say this</button><button id="send" disabled>Send</button></div>
 <div id="out"></div>
 <div id="stats"></div>
 
@@ -59,7 +59,7 @@
 })();
 </script>
 <script type="module">
-import { Keptsam, decodeAudio } from '../src/index.js';
+import { Keptsam, decodeAudio, SPEECH_RATE } from '../src/index.js';
 
 const $ = (id) => document.getElementById(id);
 const stats = (extra = '') => { $('stats').textContent = (llm ? JSON.stringify(llm.stats(), null, 1) : '') + extra; };
@@ -80,10 +80,39 @@ $('load').onclick = async () => {
     stats(`\nloaded in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     $('send').disabled = false;
     $('photoRow').hidden = !opt.dataset.mmproj;
+    $('voiceRow').hidden = $('speakBtn').hidden = !opt.dataset.mmproj;
   } catch (e) {
     $('stats').textContent = 'Load failed: ' + (e.stack || e);
     $('load').disabled = false;
   }
+};
+
+// Plays streamed 24 kHz PCM chunks back to back.
+let actx = null, playAt = 0;
+function play(pcm) {
+  actx ||= new AudioContext({ sampleRate: SPEECH_RATE });
+  const b = actx.createBuffer(1, pcm.length, SPEECH_RATE);
+  b.copyToChannel(pcm, 0);
+  const src = actx.createBufferSource();
+  src.buffer = b; src.connect(actx.destination);
+  playAt = Math.max(playAt, actx.currentTime + 0.05);
+  src.start(playAt);
+  playAt += b.duration;
+}
+async function say(text) {
+  // Thinking is never read aloud.
+  const spoken = text.split('</think>').pop().trim();
+  if (!spoken) return;
+  actx ||= new AudioContext({ sampleRate: SPEECH_RATE });
+  await actx.resume();
+  const t0 = performance.now();
+  const pcm = await llm.speak(spoken, { onAudio: play, onStatus: (st) => { $('status').textContent = st; } });
+  stats(`\nspoke ${(pcm.length / SPEECH_RATE).toFixed(1)} s of audio in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+}
+$('speakBtn').onclick = async () => {
+  $('speakBtn').disabled = true;
+  try { await say($('prompt').value); } catch (e) { $('out').textContent += '\n[error] ' + (e.stack || e); }
+  $('speakBtn').disabled = false;
 };
 
 let photo = null, audio = null;
@@ -138,6 +167,7 @@ $('send').onclick = async () => {
       },
     });
     messages.push({ role: 'assistant', content: reply });
+    if (!$('aloud').hidden && $('aloud').checked) await say(reply);
     stats(`\nfirst token ${((tFirst - tStart) / 1000).toFixed(2)} s, ${n} tokens, ${(n / ((performance.now() - t0) / 1000)).toFixed(1)} tok/s`);
   } catch (e) {
     out.textContent += '\n[error] ' + (e.stack || e);

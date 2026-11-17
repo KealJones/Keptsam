@@ -780,3 +780,213 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     V[base + i + half] = a * s + b * c;
   }
 }`;
+
+// ───────────── LFM3 speech generation (depthformer + codec) ─────────────
+
+/** Rows idx[i] of a Q8_0 matrix (K columns), dequantized: Y[i, :]. idx are u32 in `I`. */
+export const gatherQ8_0 = /* wgsl */ `
+struct P { K: u32, dOff: u32, n: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<u32>;
+@group(0) @binding(2) var<storage, read> I: array<u32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let i = wid.x;
+  let row = I[i];
+  let nb = p.K / 32u;
+  for (var k = lid.x; k < p.K; k += 64u) {
+    let blk = row * nb + k / 32u;
+    let dw = W[p.dOff + (blk >> 1u)];
+    let d = select(unpack2x16float(dw).x, unpack2x16float(dw).y, (blk & 1u) == 1u);
+    let j = k % 32u;
+    let byte = (W[blk * 8u + j / 4u] >> ((j % 4u) * 8u)) & 0xffu;
+    Y[i * p.K + k] = f32(select(i32(byte), i32(byte) - 256, byte >= 128u)) * d;
+  }
+}`;
+
+/** Depthformer input: X[i] = P[i] + (mask[i] ? T[i] : M) for n positions of width K (mask as f32 0/1). */
+export const depthInput = /* wgsl */ `
+struct P { K: u32, n: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> Pj: array<f32>;
+@group(0) @binding(2) var<storage, read> T: array<f32>;
+@group(0) @binding(3) var<storage, read> M: array<f32>;
+@group(0) @binding(4) var<storage, read> mask: array<f32>;
+@group(0) @binding(5) var<storage, read_write> X: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  if (idx >= p.K * p.n) { return; }
+  let i = idx / p.K; let k = idx % p.K;
+  X[idx] = Pj[idx] + mask[i] * T[idx] + (1.0 - mask[i]) * M[k];
+}`;
+
+/** Y[k] = Σ_i X[i, k] over n rows of width K. */
+export const sumRows = /* wgsl */ `
+struct P { K: u32, n: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let k = gid.x;
+  if (k >= p.K) { return; }
+  var s = 0.0;
+  for (var i = 0u; i < p.n; i++) { s += X[i * p.K + k]; }
+  Y[k] = s;
+}`;
+
+/** RMSNorm with a different weight row per input row: Y[r] = norm(X[r]) · w[r]. */
+export const rmsnormRowW = /* wgsl */ `
+struct P { N: u32, eps: f32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+var<workgroup> red: array<f32, 128>;
+@compute @workgroup_size(128)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let b = wid.x * p.N;
+  var s = 0.0;
+  for (var i = lid.x; i < p.N; i += 128u) { let v = X[b + i]; s += v * v; }
+  red[lid.x] = s; workgroupBarrier();
+  for (var k = 64u; k > 0u; k >>= 1u) { if (lid.x < k) { red[lid.x] += red[lid.x + k]; } workgroupBarrier(); }
+  let inv = inverseSqrt(red[0] / f32(p.N) + p.eps);
+  for (var i = lid.x; i < p.N; i += 128u) { Y[b + i] = X[b + i] * inv * w[b + i]; }
+}`;
+
+/** Per-group matvec on a Q8_0 matrix: row r uses input row r / rowsPerGroup (codebook logits). */
+export const matvecQ8Grouped = /* wgsl */ `
+struct P { rows: u32, K: u32, dOff: u32, rowsPerGroup: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<u32>;
+@group(0) @binding(2) var<storage, read> X: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+var<workgroup> red: array<f32, 256>;
+fn s8(w: u32, j: u32) -> f32 { let b = (w >> (j * 8u)) & 0xffu; return f32(select(i32(b), i32(b) - 256, b >= 128u)); }
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let g = li / 32u; let lane = li % 32u;
+  let row = (wid.y * 4096u + wid.x) * 8u + g;
+  let nb = p.K / 32u;
+  var acc = 0.0;
+  if (row < p.rows) {
+    let xb = (row / p.rowsPerGroup) * p.K;
+    for (var b = lane; b < nb; b += 32u) {
+      let blk = row * nb + b;
+      let dw = W[p.dOff + (blk >> 1u)];
+      let d = select(unpack2x16float(dw).x, unpack2x16float(dw).y, (blk & 1u) == 1u);
+      var s = 0.0;
+      for (var w = 0u; w < 8u; w++) {
+        let q = W[blk * 8u + w];
+        for (var j = 0u; j < 4u; j++) { s += s8(q, j) * X[xb + b * 32u + w * 4u + j]; }
+      }
+      acc += s * d;
+    }
+  }
+  red[li] = acc;
+  workgroupBarrier();
+  for (var s = 16u; s > 0u; s >>= 1u) { if (lane < s) { red[li] += red[li + s]; } workgroupBarrier(); }
+  if (lane == 0u && row < p.rows) { Y[row] = red[li]; }
+}`;
+
+/** In place: O[t, h, :] *= sigmoid(G[t·H + h]) for heads of size D. */
+export const gateHeads = /* wgsl */ `
+struct P { H: u32, D: u32, n: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> O: array<f32>;
+@group(0) @binding(2) var<storage, read> G: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.n) { return; }
+  O[i] *= 1.0 / (1.0 + exp(-G[i / p.D]));
+}`;
+
+/** Y[t·R + r, :] = X[t, :]: every row repeated R times (nearest upsampling). */
+export const repeatRows = /* wgsl */ `
+struct P { K: u32, R: u32, n: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.n) { return; }
+  let row = i / p.K; let k = i % p.K;
+  Y[i] = X[(row / p.R) * p.K + k];
+}`;
+
+/** Copy rows idx[i] of an f32 table (K columns): Y[i, :] = W[idx[i], :]. */
+export const gatherF32 = /* wgsl */ `
+struct P { K: u32, n: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<f32>;
+@group(0) @binding(2) var<storage, read> I: array<u32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.n * p.K) { return; }
+  Y[i] = W[I[i / p.K] * p.K + i % p.K];
+}`;
+
+/**
+ * Causal sliding-window attention over a ring KV cache with general head sizes (codec decoder).
+ * Scores: S[(t·H + h), j] for query positions pos0 + t, cache slot j holding the latest position ≡ j (mod slots).
+ */
+export const ringScores = /* wgsl */ `
+struct P { pos0: u32, T: u32, slots: u32, L: u32, window: u32, H: u32, HK: u32, D: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> Q: array<f32>;
+@group(0) @binding(2) var<storage, read> KC: array<f32>;
+@group(0) @binding(3) var<storage, read_write> S: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let j = gid.x; let th = gid.y;
+  if (j >= p.L) { return; }
+  let t = th / p.H; let h = th % p.H;
+  let qp = i32(p.pos0 + t);
+  let maxPos = p.pos0 + p.T - 1u;
+  let back = (maxPos + p.slots - (j % p.slots)) % p.slots;
+  let kp = i32(maxPos) - i32(back);
+  var s = -3.0e38;
+  if (kp >= 0 && kp <= qp && u32(qp - kp) < p.window) {
+    let qb = th * p.D; let kb = (j * p.HK + h / (p.H / p.HK)) * p.D;
+    var acc = 0.0;
+    for (var d = 0u; d < p.D; d++) { acc += Q[qb + d] * KC[kb + d]; }
+    s = acc * inverseSqrt(f32(p.D));
+  }
+  S[th * p.L + j] = s;
+}`;
+
+/** O[t, h, :] = Σ_j S[(t·H + h), j] · VC[j, h / (H/HK), :]. */
+export const ringOut = /* wgsl */ `
+struct P { L: u32, H: u32, HK: u32, D: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> S: array<f32>;
+@group(0) @binding(2) var<storage, read> VC: array<f32>;
+@group(0) @binding(3) var<storage, read_write> O: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let th = wid.x; let h = th % p.H;
+  for (var d = lid.x; d < p.D; d += 64u) {
+    var acc = 0.0;
+    for (var j = 0u; j < p.L; j++) { acc += S[th * p.L + j] * VC[(j * p.HK + h / (p.H / p.HK)) * p.D + d]; }
+    O[th * p.D + d] = acc;
+  }
+}`;
+
+/** Writes T rows of width W into a ring cache of `slots` rows at positions pos0 + t. */
+export const ringWrite = /* wgsl */ `
+struct P { pos0: u32, slots: u32, W: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(2) var<storage, read_write> C: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = wid.x;
+  let slot = (p.pos0 + t) % p.slots;
+  for (var i = lid.x; i < p.W; i += 64u) { C[slot * p.W + i] = X[t * p.W + i]; }
+}`;

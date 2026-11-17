@@ -13,8 +13,10 @@ import { LFM3Vision } from './models/lfm3vl.js';
 import { LFM3Audio } from './models/lfm3a.js';
 import { patchify } from './image.js';
 import { logMel, decodeAudio, parseWav } from './audio.js';
+import { LFM3SpeechGen } from './models/lfm3gen.js';
+import { Istft, sampleCode, wav, SPEECH_RATE } from './speech.js';
 
-export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, LFM3Audio, cachedSource, clearCache, patchify, logMel, decodeAudio, parseWav };
+export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, LFM3Audio, LFM3SpeechGen, cachedSource, clearCache, patchify, logMel, decodeAudio, parseWav, wav, SPEECH_RATE };
 
 export class Keptsam {
   /**
@@ -171,6 +173,61 @@ export class Keptsam {
       for (let i = 0; i < tokens; i += this.model.chunk) await this.model.forwardEmbeds(buf, i, Math.min(this.model.chunk, tokens - i));
     } finally { this.gpu.free(buf); }
     o.onStatus?.(`read image (${tokens} tokens)`);
+  }
+
+  /**
+   * Text to speech with the model's own voice (Omni mmproj). Streams PCM chunks (24 kHz mono Float32Array) to
+   * `onAudio` as frames are made, and resolves to the whole clip.
+   * @param {string} text
+   * @param {{ voice?: 'female' | 'male', language?: string, maxSeconds?: number, temperature?: number,
+   *   onAudio?: (pcm: Float32Array) => void, onStatus?: (s: string) => void, signal?: AbortSignal }} [opts]
+   */
+  async speak(text, { voice = 'female', language = 'American English', maxSeconds = 30, temperature, onAudio, onStatus, signal } = {}) {
+    if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot speak.');
+    if (!this.speechGen) {
+      onStatus?.('loading voice');
+      this.speechGen = await LFM3SpeechGen.load(this.gpu, this.encoders.src, this.encoders.gguf);
+    }
+    const g = this.speechGen, m = this.model, V = g.nVocab, n = g.nCb;
+    const cfg = { ...g.sampling, temp: temperature ?? g.sampling.temp };
+    const prompt = this.tokenizer.tokens[this.tokenizer.bos] +
+      `<|im_start|>system\nPerform TTS in ${language} using a ${voice} voice.<|im_end|>\n` +
+      `<|im_start|>user\n${text}<|im_end|>\n<|im_start|>assistant\n<think></think><|audio_start|>`;
+    const ids = this.tokenizer.encode(prompt);
+    m.reset();
+    this.history = [];
+    for (let i = 0; i < ids.length; i += m.chunk) await m.forward(ids.slice(i, i + m.chunk));
+    g.resetCodec();
+    const ist = new Istft();
+    const chunks = [];
+    const emit = (pcm) => { if (pcm.length) { chunks.push(pcm); onAudio?.(pcm); } };
+    const recent = Array.from({ length: n }, () => []);
+    onStatus?.('speaking');
+    const maxFrames = Math.ceil(maxSeconds * 12.5);
+    for (let f = 0; f < maxFrames && m.pos < m.ctx; f++) {
+      if (signal?.aborted) break;
+      // MaskGIT: reveal the 12 codebooks in a random order, 4 per depthformer pass.
+      const order = [...Array(n).keys()].sort(() => Math.random() - 0.5);
+      const codes = new Array(n).fill(-1);
+      for (let pass = 0, k = 0; pass < 3; pass++) {
+        const l = await g.codeLogits(m.a.headIn, codes);
+        for (let j = 0; j < 4; j++, k++) {
+          const i = order[k];
+          codes[i] = sampleCode(l.subarray(i * V, (i + 1) * V), recent[i].slice(-cfg.lastN), cfg);
+        }
+      }
+      if (codes.includes(V - 1)) break; // end of audio
+      codes.forEach((c, i) => recent[i].push(c));
+      await m.forwardEmbeds(await g.feedback(codes), 0, 1);
+      const st = await g.decodeFrame(codes);
+      for (let s = 0; s < 6; s++) emit(ist.frame(st, s * 1282));
+    }
+    emit(ist.flush());
+    if (!this.keepEncoders) { g.free(); this.speechGen = null; }
+    const out = new Float32Array(chunks.reduce((s, c) => s + c.length, 0));
+    let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; }
+    onStatus?.(`spoke ${(out.length / SPEECH_RATE).toFixed(1)} s`);
+    return out;
   }
 
   /** Memory and timing report. */
