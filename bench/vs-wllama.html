@@ -68,8 +68,7 @@ try {
     });
   } else {
     const { Wllama } = await import(WLLAMA + 'index.js');
-    const W = (await import(WLLAMA + 'wasm-from-cdn.js')).default;
-    const w = new Wllama(W);
+    const w = new Wllama({ default: WLLAMA + 'wasm/wllama.wasm' }); // the package's wasm-from-cdn.js isn't published
     w.setCompat('default', 'safari'); // wllama's own Safari path
     result.webgpu = w.isSupportWebGPU();
     // Tokenizer only (reads the GGUF header, a few MB, not the weights) so the prompt text matches Keptsam's.
