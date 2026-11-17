@@ -18,7 +18,7 @@ const qs = new URLSearchParams(location.search);
 const engine = qs.get('engine') || 'keptsam';
 const nPrompt = Number(qs.get('prompt') || 256), nGen = Number(qs.get('gen') || 64), ctx = Number(qs.get('ctx') || 2048);
 const MODEL = 'https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf';
-const WLLAMA = 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/';
+const WLLAMA = 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.13.0/esm/';
 const run = `${engine} p${nPrompt} g${nGen} @${new Date().toISOString()}`;
 const log = (...a) => { const s = a.join(' '); document.getElementById('log').textContent += s + '\n'; console.log(s); };
 const bar = (s) => { document.getElementById('kbar').textContent = `${engine}: ${s}`; };
@@ -69,10 +69,10 @@ try {
   } else {
     const { Wllama } = await import(WLLAMA + 'index.js');
     const w = new Wllama({ default: WLLAMA + 'wasm/wllama.wasm' }); // the package's wasm-from-cdn.js isn't published
-    // On iOS Safari 27.2 wllama's check (new WebAssembly.Memory({ address: 'i64' })) passes but its wasm then fails
+    // On iOS Safari 27.2 wllama (3.8.1 and 3.13.0)'s check (new WebAssembly.Memory({ address: 'i64' })) passes but its wasm then fails
     // to compile ("Memory64 is not enabled"), so it never picks its Safari build. Force that build unless ?compat=0.
     if (qs.get('compat') !== '0') {
-      const C = 'https://cdn.jsdelivr.net/npm/@wllama/wllama-compat@3.8.1/wasm/';
+      const C = 'https://cdn.jsdelivr.net/npm/@wllama/wllama-compat@3.13.0/wasm/';
       w.getWorkerResources = () => ({ wasmPath: C + 'wllama.wasm', jsPath: C + 'wllama.js', compat: true });
     }
     result.compat = qs.get('compat') !== '0';
