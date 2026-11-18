@@ -4,7 +4,42 @@ Every runtime below ran the same model, Liquid AI's **LFM3 1.7B** (4-bit), in Sa
 The rows link to where each result is recorded. Results that were seen but never written down are left out on
 purpose; [Next runs](#next-runs) lists what would fill the gaps.
 
-## LFM3 1.7B, by runtime
+## Head to head: one phone, one day (Nov 18, 2026)
+
+[`bench/compare.html`](../bench/compare.html) on an iPhone 16, Safari 27.2: every runtime in a fresh page load,
+the same text, greedy, 64 tokens written, 4K context, one warm-up request each. One run per cell.
+
+| Runtime | 256-token prompt | 1,024 | 3,072 |
+|---|---|---|---|
+| **Tilde** | ✅ read 50, write 12.0, first token 5.1 s | ✅ read 34.9, write 6.9, first token 29.4 s | ✅ read 40.8, write 8.6, first token 75.3 s |
+| **WebLLM 0.2.87** (our QAD MLC build), stock | ✅ read 84.4, write 12.3, first token 3.0 s | 💀 tab killed while loading | skipped |
+| **WebLLM + Squiggle's pacing** | ✅ read 75.5, write 12.1, first token 3.4 s | ✅ read 66.7, write 8.4, first token 15.4 s | 💀 tab killed while loading |
+| **wllama 3.13 WebGPU** (Safari build) | 💀 tab killed while loading | skipped | skipped |
+| **wllama 3.13 CPU** (Safari build, 1 thread) | ✅ read 1.8, write 1.4, first token 2.4 min | ✅ read 1.6, write 1.6, first token 10.8 min | ⏱ no answer in 25 min |
+| **transformers.js 4.4** (onnx-community q4f16) | 💀 tab killed while loading the model, twice | skipped | skipped |
+| **LiteRT-LM 0.19** (litert-community int4) | 💀 tab killed while loading, at 1,593 MB of GPU buffers | skipped | skipped |
+
+Speeds in tokens per second. GPU memory: Tilde 1,124 MB, WebLLM 1,040 MB (both counted by watching
+`createBuffer`). All three GPU runtimes that answered wrote the same continuation.
+
+What this run says, and doesn't:
+
+- **Only Tilde finished every prompt size.** That is the whole of its lead in this run.
+- **Where WebLLM survived, it was faster.** With Squiggle's pacing it read prompts 1.5× (256) to 1.9× (1,024) faster
+  and reached the first token in about half the time. Writing speed was about even at 256 and in WebLLM's favour at
+  1,024.
+- **Both WebLLM deaths happened while loading,** before any prompt was read, so they are not caused by the prompt
+  size. They may come from memory left behind by the test before (iOS frees a closed page's memory lazily) and need
+  reruns before they count against WebLLM.
+- **The 1,024 round was slow for everyone.** Tilde read and wrote more slowly at 1,024 than at 3,072, which a longer
+  context can't explain, and paced WebLLM dropped in the same round; it came right after 3 minutes of wllama on the
+  CPU. Repeats and a fixed GPU workload timed before each test would separate heat from engine speed.
+- **Stock WebLLM survived a 256-token prompt** on Safari 27.2, so the watchdog bites somewhere above that, not on
+  every prompt.
+
+Full table with every note: [runs/2026-11-18-iphone16-lfm3.md](runs/2026-11-18-iphone16-lfm3.md).
+
+## Earlier results, by runtime
 
 | Runtime | Result | Speed | Memory | How it ended |
 |---|---|---|---|---|
@@ -53,18 +88,18 @@ by design.
 - **Tilde doesn't use less memory than WebLLM.** At 4K it's 1,123 MB against WebLLM's 1,021 MB, and the two are
   counted differently. Tilde's case is that it survives iOS 27 without patches, needs no compile jobs, runs official
   GGUFs directly and swaps senses in and out.
-- **WebLLM reads prompts faster** (~100 against 51 tok/s), but that ~100 is its unpaced speed, which iOS 27.2.1 now
-  kills. Its paced speed hasn't been measured.
-- **WebLLM's 13.7 tok/s was measured on Nov 10, before iOS 27.2.1,** and Tilde's 12.6 on Nov 16. A fair comparison
-  needs both on the same day and the same iOS.
+- **WebLLM reads prompts faster, paced or not.** Measured side by side on Nov 18: 75.5 against Tilde's 50 tok/s at
+  256 tokens, 66.7 against 34.9 at 1,024 (see the head-to-head above).
+- **Writing speed is about even** when both run on the same day (12.1–12.3 against 12.0 tok/s at 256); the 13.7
+  from Nov 10 was before iOS 27.2.1.
 - **The wllama run doesn't record whether it used the GPU.** `result.webgpu` is only saved when a run finishes, so
   it was lost with the tab.
 
 ## Next runs
 
-- [`bench/compare.html`](../bench/compare.html) runs all of them on one phone, one day: Tilde, WebLLM (stock and with
-  Squiggle's pacing), wllama on WebGPU and on the CPU, transformers.js and LiteRT-LM, each in a fresh page load, at
-  several prompt sizes. Every step is saved as it happens, so a killed tab is recorded with the stage it died in and
-  the GPU memory at the time, and the page moves on to the next test by itself.
-- Tilde with a 1,024-token prompt, and Tilde at 6K and 8K. If Tilde loads at 8K, that's a direct win over WebLLM,
-  which died loading there.
+- Rerun the two WebLLM deaths (both while loading) and repeat every cell three times, with a fixed GPU workload
+  timed before each test, so heat and leftover memory stop deciding results.
+- Tilde at 6K and 8K. If Tilde loads at 8K, that's a direct win over WebLLM, which died loading there on Nov 15.
+- The same table with a model small enough that nothing should die (Qwen3 0.6B has a build for every other
+  runtime), to measure engine speed alone. Tilde needs a Qwen3 architecture file first.
+- Close the reading-speed gap: at 1,024 tokens WebLLM reads ~1.9× faster.

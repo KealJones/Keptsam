@@ -59,18 +59,23 @@ flowchart LR
 
 ## Next to the other runtimes
 
-The same LFM3 1.7B on the same iPhone 16 in Safari, Nov 2026. Details, sources and caveats are in
-[docs/compared.md](docs/compared.md).
+The same LFM3 1.7B on one iPhone 16, Safari 27.2, Nov 18, 2026, from [bench/compare.html](bench/compare.html):
+each runtime in a fresh page, same text, 64 tokens written. Speeds in tokens per second (read / write); one run per
+cell. Details and caveats are in [docs/compared.md](docs/compared.md).
 
-| Runtime | Result | Speed | How it ended |
+| Runtime | 256-token prompt | 1,024 | 3,072 |
 |---|---|---|---|
-| **Tilde** | ✅ runs | 51 tok/s reading, 12.6 writing | 1,123 MB at 4K, matches llama.cpp |
-| **WebLLM** (our own MLC build) | ✅ with patches | 13.7 tok/s writing (before iOS 27.2.1) | Needs paced prefill since iOS 27.2.1; 8K killed the tab |
-| **wllama 3.13** (llama.cpp, WebAssembly) | ❌ | – | Default build won't compile on iOS 27.2; forced Safari build got the tab killed |
-| **transformers.js** (ONNX, WebGPU) | ❌ | – | Never finished downloading; 3 of 4 tries killed the tab |
+| **Tilde** | ✅ 50 / 12.0 | ✅ 34.9 / 6.9 | ✅ 40.8 / 8.6 |
+| **WebLLM** (our MLC build), stock | ✅ 84.4 / 12.3 | 💀 killed while loading | – |
+| **WebLLM** + Squiggle's pacing | ✅ 75.5 / 12.1 | ✅ 66.7 / 8.4 | 💀 killed while loading |
+| **wllama 3.13** WebGPU | 💀 killed while loading | – | – |
+| **wllama 3.13** CPU | ✅ 1.8 / 1.4 | ✅ 1.6 / 1.6 (10.8 min to first token) | ⏱ timed out at 25 min |
+| **transformers.js 4.4** | 💀 killed while loading | – | – |
+| **LiteRT-LM 0.19** | 💀 killed while loading | – | – |
 
-Tilde isn't the fastest writer or the smallest in memory. It's the one that stays up on iOS 27 without patches,
-needs no compile jobs, reads Liquid's official GGUFs as they are and swaps senses in and out.
+Tilde isn't the fastest: where WebLLM survives, it reads prompts 1.5–1.9× faster. Tilde is the only one that
+finished every prompt size, and it stays up on iOS 27 without patches, needs no compile jobs, reads Liquid's
+official GGUFs as they are and swaps senses in and out.
 
 ## Quick start
 
