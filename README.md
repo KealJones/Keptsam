@@ -5,9 +5,13 @@
 <p align="center"><a href="#quick-start">Quick start</a> · <a href="docs/design.md">Design doc</a> · <a href="bench/">Benchmarks and checks</a></p>
 
 A phone's browser tab is a hostile place for a 1 GB model. iOS gives the whole tab about **1.9 GB**, shared by
-JavaScript, WebAssembly and every GPU buffer, and kills it (Jetsam) the moment it goes over. WebKit drops the GPU if
-one command buffer runs past about **3 seconds**. Most browser runtimes hope to stay under those lines. Tilde is built
-around them.
+JavaScript, WebAssembly and every GPU buffer, and kills it (Jetsam) the moment it goes over
+([measured on an iPhone 16](https://github.com/KealJones/squiggle/blob/main/app/memcap.html); WebKit's engineers on
+the OS limit: [bug 268816](https://bugs.webkit.org/show_bug.cgi?id=268816)). WebKit drops the GPU if one command buffer
+runs past about **3 seconds** ([WebKit's watchdog](https://github.com/WebKit/WebKit/blob/main/Source/WebGPU/WebGPU/Queue.mm#L492-L494),
+which logs "did not complete within 3s timeout"; the same crash in
+[onnxruntime#33753](https://github.com/microsoft/onnxruntime/issues/33753)). Most browser runtimes hope to stay under
+those lines. Tilde is built around them.
 
 The `~` is for the limits it lives under, which only ever come approximately: ~1.9 GB, ~3 s.
 
