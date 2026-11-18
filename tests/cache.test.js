@@ -36,7 +36,7 @@ test('pieces a load cached count once the size is known, and finishing them need
   const c = await cachedSource(src, { key, size });
   await c.read(0, size);                                   // a load streams the whole file through the cache
   assert.deepEqual(await cachedFileInfo(key), { size: 0, stored: 0, complete: false }, 'no size record: unknown');
-  assert.deepEqual(await cachedFileInfo(key, 'keptsam-v1', { size }), { size, stored: size, complete: true });
+  assert.deepEqual(await cachedFileInfo(key, 'tilde-v1', { size }), { size, stored: size, complete: true });
   reads = 0;
   const seen = [];
   await cacheFile(key, { source: src, size, onProgress: (d) => seen.push(d) });

@@ -1,7 +1,5 @@
 // Caches a byte source in fixed 16 MB pieces with the Cache API, so a model downloads once.
 // Only one or two pieces are in memory at a time.
-// The cache name keptsam-v1 and the keptsam.cache keys keep the old name on purpose: renaming them would orphan
-// every model already downloaded, and Squiggle's service worker keeps keptsam-v1 and would delete a new name.
 
 const PIECE = 16 << 20;
 
@@ -9,12 +7,12 @@ const PIECE = 16 << 20;
  * @param {import('./gguf.js').ByteSource} src
  * @param {{ key: string, cacheName?: string, size?: number }} opts  `key` identifies the file (usually its URL).
  */
-export async function cachedSource(src, { key, cacheName = 'keptsam-v1', size } = {}) {
+export async function cachedSource(src, { key, cacheName = 'tilde-v1', size } = {}) {
   if (typeof caches === 'undefined') return src;
   let cache;
   try { cache = await caches.open(cacheName); } catch { return src; }
   // The Cache API ignores #fragments when matching, so each piece gets its own path.
-  const reqFor = (i) => new Request(`https://keptsam.cache/${encodeURIComponent(key)}/${PIECE}/${i}`);
+  const reqFor = (i) => new Request(`https://tilde.cache/${encodeURIComponent(key)}/${PIECE}/${i}`);
   const piece = async (i) => {
     const hit = await cache.match(reqFor(i));
     if (hit) return new Uint8Array(await hit.arrayBuffer());
@@ -51,12 +49,12 @@ async function readUpTo(src, offset, length) {
 }
 
 /** Deletes every cached model piece. */
-export async function clearCache(cacheName = 'keptsam-v1') {
+export async function clearCache(cacheName = 'tilde-v1') {
   if (typeof caches !== 'undefined') await caches.delete(cacheName);
 }
 
-const sizeReq = (key) => new Request(`https://keptsam.cache/${encodeURIComponent(key)}/size`);
-const pieceReq = (key, i) => new Request(`https://keptsam.cache/${encodeURIComponent(key)}/${PIECE}/${i}`);
+const sizeReq = (key) => new Request(`https://tilde.cache/${encodeURIComponent(key)}/size`);
+const pieceReq = (key, i) => new Request(`https://tilde.cache/${encodeURIComponent(key)}/${PIECE}/${i}`);
 
 /**
  * Downloads a whole file into the cache, piece by piece (resumable: pieces already there are skipped), so a later
@@ -66,7 +64,7 @@ const pieceReq = (key, i) => new Request(`https://keptsam.cache/${encodeURICompo
  * @param {{ key?: string, cacheName?: string, source?: import('./gguf.js').ByteSource, size?: number,
  *   onProgress?: (done: number, total: number) => void, signal?: AbortSignal }} [opts]
  */
-export async function cacheFile(url, { key = url, cacheName = 'keptsam-v1', source, size: known = 0, onProgress, signal } = {}) {
+export async function cacheFile(url, { key = url, cacheName = 'tilde-v1', source, size: known = 0, onProgress, signal } = {}) {
   const cache = await caches.open(cacheName);
   const src = source || (await import('./gguf.js')).httpSource(url);
   let size = Number(await (await cache.match(sizeReq(key)))?.text()) || known || 0;
@@ -88,7 +86,7 @@ export async function cacheFile(url, { key = url, cacheName = 'keptsam-v1', sour
  * How much of a file is cached: { size, stored, complete } (size 0 if it was never fully downloaded and no `size` is
  * given). Pieces cached by a load (cachedSource) carry no size record, so they count only when the caller says the size.
  */
-export async function cachedFileInfo(key, cacheName = 'keptsam-v1', { size: known = 0 } = {}) {
+export async function cachedFileInfo(key, cacheName = 'tilde-v1', { size: known = 0 } = {}) {
   if (typeof caches === 'undefined') return { size: 0, stored: 0, complete: false };
   const cache = await caches.open(cacheName);
   const size = Number(await (await cache.match(sizeReq(key)))?.text()) || known || 0;
@@ -99,9 +97,9 @@ export async function cachedFileInfo(key, cacheName = 'keptsam-v1', { size: know
 }
 
 /** Deletes one file's pieces from the cache. */
-export async function removeCachedFile(key, cacheName = 'keptsam-v1') {
+export async function removeCachedFile(key, cacheName = 'tilde-v1') {
   if (typeof caches === 'undefined') return;
   const cache = await caches.open(cacheName);
-  const prefix = `https://keptsam.cache/${encodeURIComponent(key)}/`;
+  const prefix = `https://tilde.cache/${encodeURIComponent(key)}/`;
   for (const req of await cache.keys()) if (req.url.startsWith(prefix)) await cache.delete(req);
 }
