@@ -41,10 +41,10 @@ export async function cachedSource(src, { key, cacheName = 'tilde-v1', size } = 
 }
 
 // The last piece of a file is short; a source may refuse to read past the end, so ask for less on failure.
-async function readUpTo(src, offset, length) {
-  try { return await src.read(offset, length); } catch (e) {
-    if (!src.size) throw e;
-    return src.read(offset, Math.min(length, src.size - offset));
+async function readUpTo(src, offset, length, opts) {
+  try { return await src.read(offset, length, opts); } catch (e) {
+    if (!src.size || e.name === 'AbortError') throw e;
+    return src.read(offset, Math.min(length, src.size - offset), opts);
   }
 }
 
@@ -68,18 +68,48 @@ export async function cacheFile(url, { key = url, cacheName = 'tilde-v1', source
   const cache = await caches.open(cacheName);
   const src = source || (await import('./gguf.js')).httpSource(url);
   let size = Number(await (await cache.match(sizeReq(key)))?.text()) || known || 0;
-  if (!size) { await src.read(0, 1); size = src.size; }
+  if (!size) { await src.read(0, 1, { signal }); size = src.size; }
   if (!size) throw new Error(`${url}: the server didn't say how big the file is`);
   const n = Math.ceil(size / PIECE);
+  const lenOf = (i) => Math.min(PIECE, size - i * PIECE);
   let done = 0;
   for (let i = 0; i < n; i++) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    const len = Math.min(PIECE, size - i * PIECE);
-    if (!(await cache.match(pieceReq(key, i)))) await cache.put(pieceReq(key, i), new Response(await readUpTo(src, i * PIECE, len)));
-    done += len;
+    if (!(await cache.match(pieceReq(key, i)))) {
+      // A server that ignores Range (src.rangeIgnored): the rest of the file in one request, cut into pieces as it
+      // streams, instead of the whole file again for every piece.
+      if (src.rangeIgnored && src.stream) { await streamRest(cache, key, src, i, n, lenOf, done, size, onProgress, signal); break; }
+      const base = done;
+      const bytes = await readUpTo(src, i * PIECE, lenOf(i), { signal, onBytes: (got) => onProgress?.(base + got, size) });
+      await cache.put(pieceReq(key, i), new Response(bytes));
+    }
+    done += lenOf(i);
     onProgress?.(done, size);
   }
   await cache.put(sizeReq(key), new Response(String(size)));
+}
+
+// Pieces `from`… taken from one streamed response; pieces already cached are skipped over, not stored again.
+async function streamRest(cache, key, src, from, n, lenOf, done, size, onProgress, signal) {
+  const reader = await src.stream(from * PIECE, { signal });
+  try {
+    for (let i = from; i < n; i++) {
+      const len = lenOf(i);
+      const have = await cache.match(pieceReq(key, i));
+      const buf = new Uint8Array(len);
+      let got = 0;
+      while (got < len) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const chunk = await reader.next(len - got);
+        if (!chunk) throw new Error(`${key}: the download ended early at ${i * PIECE + got} of ${size} bytes`);
+        if (!have) buf.set(chunk, got);
+        got += chunk.length;
+        onProgress?.(done + got, size);
+      }
+      if (!have) await cache.put(pieceReq(key, i), new Response(buf));
+      done += len;
+    }
+  } finally { reader.cancel(); }
 }
 
 /**

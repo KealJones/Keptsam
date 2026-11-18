@@ -20,23 +20,135 @@ export const GGML_TYPES = {
  */
 
 /** Byte source over HTTP range requests. */
-export function httpSource(url, { fetchImpl = fetch } = {}) {
-  return {
+/**
+ * Reads byte ranges of a file over HTTP.
+ *
+ * Hugging Face answers with a redirect to its storage server, and iPhone Safari loses the Range header on that
+ * redirect (Keal's iPhone, 2026-11-17: asked for 16 MB, got status 200 and the whole 1 GB file, which sat the
+ * download at 0% and then got the tab killed). So: after the first answer, reads go straight to the address the
+ * redirect ended at (`res.url`), where Range is kept; a signed address that expires (401/403/410) sends reads
+ * back to the original URL. A server that still answers 200 is read as a stream, skipping to the part asked for
+ * and stopping there, never as one buffer of the whole file; `rangeIgnored` is set so a caller copying the whole
+ * file (cacheFile) can take it in one pass instead. A response that sends nothing for `stallMs` is dropped and
+ * asked again, up to `retries` times.
+ *
+ * @param {string} url
+ * @param {{ fetchImpl?: typeof fetch, stallMs?: number, retries?: number }} [opts]
+ */
+export function httpSource(url, { fetchImpl = fetch, stallMs = 30000, retries = 3 } = {}) {
+  let target = url;
+  const src = {
     name: url,
-    async read(offset, length) {
-      const res = await fetchImpl(url, { headers: { Range: `bytes=${offset}-${offset + length - 1}` } });
-      if (res.status !== 206 && res.status !== 200) throw new Error(`GGUF read ${res.status} for ${url}`);
-      const buf = new Uint8Array(await res.arrayBuffer());
-      // A server that ignores Range sends the whole file; slice it rather than fail.
-      if (res.status === 200 && buf.length > length) return buf.subarray(offset, offset + length);
-      const total = Number(/\/(\d+)$/.exec(res.headers.get('Content-Range') || '')?.[1]);
-      if (total) this.size = total;
-      // Reads that run past the end of the file come back short; that's fine at the end.
-      if (buf.length !== length && !(total && offset + buf.length === total)) {
-        throw new Error(`GGUF short read: wanted ${length} bytes at ${offset}, got ${buf.length}`);
+    size: 0,
+    rangeIgnored: false,
+    /**
+     * @param {number} offset @param {number} length
+     * @param {{ onBytes?: (got: number) => void, signal?: AbortSignal }} [o] onBytes: bytes of this read so far
+     */
+    async read(offset, length, { onBytes, signal } = {}) {
+      let lastError;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        if (attempt) await new Promise(r => setTimeout(r, Math.min(8000, 500 * 2 ** attempt)));
+        try {
+          return await once(offset, length, onBytes, signal);
+        } catch (e) {
+          if (e.name === 'AbortError' && signal?.aborted) throw e;
+          if (e.fatal) throw e;
+          lastError = e;
+          if (e.expired) target = url;
+        }
       }
-      return buf;
+      throw lastError;
     },
+    /** One request from `offset` to the end, read as a stream (for servers that ignore Range). */
+    async stream(offset, { signal } = {}) {
+      const res = await request(offset, null, signal);
+      return skipTo(res.body.getReader(), res.status === 206 ? 0 : offset, stallMs, res.abort);
+    },
+  };
+
+  async function request(offset, length, signal) {
+    const ctl = new AbortController();
+    const stop = () => ctl.abort();
+    signal?.addEventListener('abort', stop, { once: true });
+    const range = length == null ? `bytes=${offset}-` : `bytes=${offset}-${offset + length - 1}`;
+    const timer = setTimeout(stop, stallMs);
+    let res;
+    try {
+      res = await fetchImpl(target, { headers: { Range: range }, signal: ctl.signal });
+    } catch (e) {
+      throw ctl.signal.aborted && !signal?.aborted ? Object.assign(new Error(`${url}: no answer in ${stallMs / 1000} s`), { name: 'StallError' }) : e;
+    } finally { clearTimeout(timer); }
+    if ([401, 403, 410].includes(res.status) && target !== url) throw Object.assign(new Error(`${url}: the storage address expired (${res.status})`), { expired: true });
+    if (res.status !== 206 && res.status !== 200) throw Object.assign(new Error(`GGUF read ${res.status} for ${url}`), { fatal: res.status === 404 });
+    // Straight to where the redirect ended from now on: Range survives there.
+    if (res.url && res.url !== target) target = res.url;
+    const total = Number(/\/(\d+)$/.exec(res.headers.get('Content-Range') || '')?.[1]) || (res.status === 200 ? Number(res.headers.get('Content-Length')) : 0);
+    if (total) src.size = total;
+    if (res.status === 200 && !res.redirected) src.rangeIgnored = true;
+    res.abort = stop;   // ends the transfer: a body left unread would otherwise keep downloading
+    return res;
+  }
+
+  async function once(offset, length, onBytes, signal) {
+    let res = await request(offset, length, signal);
+    // The Range was lost on the redirect: ask the storage server itself, once, before reading a whole file.
+    if (res.status === 200 && res.redirected && res.url) {
+      res.abort();
+      res = await request(offset, length, signal);
+    }
+    const reader = skipTo(res.body.getReader(), res.status === 206 ? 0 : offset, stallMs, res.abort);
+    try {
+      return await readInto(reader, offset, length, onBytes);
+    } finally { reader.cancel(); }
+  }
+
+  async function readInto(reader, offset, length, onBytes) {
+    const want = Math.min(length, src.size ? src.size - offset : length);
+    const out = new Uint8Array(want);
+    let got = 0;
+    while (got < want) {
+      const chunk = await reader.next(want - got);
+      if (!chunk) break;
+      out.set(chunk, got);
+      got += chunk.length;
+      onBytes?.(got);
+    }
+    // Reads that run past the end of the file come back short; that's fine at the end.
+    if (got !== length && !(src.size && offset + got === src.size)) {
+      throw new Error(`GGUF short read: wanted ${length} bytes at ${offset}, got ${got}`);
+    }
+    return got === want ? out : out.subarray(0, got);
+  }
+  return src;
+}
+
+// A response body read in chunks: the first `skip` bytes dropped, at most `max` bytes per call, and a chunk that
+// takes longer than `stallMs` to arrive is an error (the read is then asked again).
+function skipTo(reader, skip, stallMs, abort = () => {}) {
+  let pending = null;
+  const pull = async () => {
+    let timer;
+    const stalled = new Promise((_, no) => { timer = setTimeout(() => no(Object.assign(new Error(`download stalled for ${stallMs / 1000} s`), { name: 'StallError' })), stallMs); });
+    try { return await Promise.race([reader.read(), stalled]); } catch (e) { abort(); throw e; } finally { clearTimeout(timer); }
+  };
+  return {
+    async next(max = Infinity) {
+      for (;;) {
+        if (!pending) {
+          const { done, value } = await pull();
+          if (done) return null;
+          pending = value;
+        }
+        if (skip >= pending.length) { skip -= pending.length; pending = null; continue; }
+        if (skip) { pending = pending.subarray(skip); skip = 0; }
+        const out = pending.length > max ? pending.subarray(0, max) : pending;
+        pending = out === pending ? null : pending.subarray(max);
+        return out;
+      }
+    },
+    cancel() { pending = null; abort(); reader.cancel().catch(() => {}); },
   };
 }
 

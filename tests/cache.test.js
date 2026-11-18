@@ -44,3 +44,26 @@ test('pieces a load cached count once the size is known, and finishing them need
   assert.equal(seen.at(-1), size);
   assert.deepEqual(await cachedFileInfo(key), { size, stored: size, complete: true }, 'the size record is written');
 });
+
+test('a server that ignores Range: cacheFile takes the rest of the file in one request, with progress inside pieces', async () => {
+  store.clear();
+  const size = (32 << 20) + 5;
+  const file = new Uint8Array(size).map((_, i) => i & 255);
+  let requests = 0;
+  const src = {
+    name: 's', size, rangeIgnored: true,
+    read: async () => { throw new Error('should stream instead'); },
+    stream: async (offset) => {
+      requests++;
+      let at = offset;
+      return { next: async (max) => { if (at >= size) return null; const out = file.slice(at, Math.min(size, at + Math.min(max, 1 << 20))); at += out.length; return out; }, cancel() {} };
+    },
+  };
+  const key = 'https://example.com/s.gguf';
+  const seen = [];
+  await cacheFile(key, { source: src, size, onProgress: (d) => seen.push(d) });
+  assert.equal(requests, 1);
+  assert.ok(seen.filter(d => d < 16 << 20).length > 5, 'progress moves inside the first piece');
+  assert.equal(seen.at(-1), size);
+  assert.deepEqual(await cachedFileInfo(key), { size, stored: size, complete: true });
+});
