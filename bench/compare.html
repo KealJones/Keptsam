@@ -37,7 +37,7 @@
 load and writes every step to this browser's storage as it goes, so a tab iOS kills still leaves its result: the next
 load records how far it got and moves on to the next test. Results never leave this phone unless you export or share them.</p>
 
-<div id="bar"><span id="status">starting…</span><button id="stop" hidden>Stop</button><button id="resume" hidden>Resume</button></div>
+<div id="bar"><span id="status">starting…</span><button id="awake" hidden>Tap to keep the screen on</button><button id="stop" hidden>Stop</button><button id="resume" hidden>Resume</button></div>
 
 <fieldset id="setup">
   <legend>New run</legend>
@@ -143,7 +143,7 @@ async function gatherFacts() {
       const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
       if (a) {
         const i = a.info || {};
-        f.adapter = [i.vendor, i.architecture, i.device, i.description].filter(Boolean).join(' ') || 'unnamed';
+        f.adapter = [...new Set([i.vendor, i.architecture, i.device, i.description].filter(Boolean))].join(' ') || 'unnamed';
         f.shaderF16 = a.features.has('shader-f16');
         f.maxBufferMB = Math.round(a.limits.maxBufferSize / 1048576);
       } else f.adapter = 'none';
@@ -676,7 +676,8 @@ function render() {
   $('which')?.addEventListener('change', (e) => { viewing = e.target.value; render(); });
   if (!s) { $('facts').textContent = 'No runs yet.'; $('table').innerHTML = ''; $('summary').innerHTML = ''; return; }
   const f = s.facts || {};
-  $('facts').textContent = `${f.device} ${f.os ? 'iOS/OS ' + f.os : ''} ${f.safari ? 'Safari ' + f.safari : ''} · GPU: ${f.adapter || 'none'}${f.shaderF16 ? ' (shader-f16)' : ''} · `
+  // Safari freezes the iOS version in its user agent (27.x still says 18.7), so only its own version means anything.
+  $('facts').textContent = `${f.device} ${f.safari ? 'Safari ' + f.safari : f.os} · GPU: ${[...new Set((f.adapter || 'none').split(' '))].join(' ')}${f.shaderF16 ? ' (shader-f16)' : ''} · `
     + `${f.cores} cores · JSPI ${f.jspi ? 'yes' : 'no'}, Memory64 ${f.memory64 ? 'yes' : 'no'} · context ${s.settings.ctx}, writing ${s.settings.gen} tokens · started ${new Date(s.started).toLocaleString()}`;
   const runs = s.queue.filter((q) => q.kind === 'run');
   // Bars: writing speed per prompt size, a cross for a runtime that never got there.
@@ -709,8 +710,8 @@ function render() {
 function markdown(s) {
   if (!s) return '';
   const f = s.facts || {};
-  const lines = [`### LFM3 1.7B, ${f.device} ${f.os || ''} ${f.safari ? 'Safari ' + f.safari : ''}, ${s.started.slice(0, 10)}`, '',
-    `GPU ${f.adapter || 'none'}${f.shaderF16 ? ' (shader-f16)' : ''}; context ${s.settings.ctx}; ${s.settings.gen} tokens written, greedy; one warm-up request each. Tilde: ${s.tilde}.`, '',
+  const lines = [`### LFM3 1.7B, ${f.device} ${f.safari ? 'Safari ' + f.safari : f.os || ''}, ${s.started.slice(0, 10)}`, '',
+    `GPU ${[...new Set((f.adapter || 'none').split(' '))].join(' ')}${f.shaderF16 ? ' (shader-f16)' : ''}; context ${s.settings.ctx}; ${s.settings.gen} tokens written, greedy; one warm-up request each. Tilde: ${s.tilde}.`, '',
     '| Runtime | Prompt | Outcome | Load s | Read tok/s | Write tok/s | First token s | GPU MB | Worst frame ms | Notes |', '|---|---:|---|---:|---:|---:|---:|---:|---:|---|'];
   for (const q of s.queue.filter((x) => x.kind === 'run')) {
     const r = q.result || {};
@@ -718,6 +719,23 @@ function markdown(s) {
   }
   return lines.join('\n');
 }
+
+// ── keeping the screen on ──────────────────────────────────────────────────────────────────────────────────
+// A locked phone stops the run (Safari is suspended). Safari only grants a wake lock after a tap, and every test is a
+// new page, so the bar shows a button whenever the lock isn't held; tapping anywhere on the page takes it too.
+let wake = null;
+async function keepAwake() {
+  if (!navigator.wakeLock || document.hidden || (wake && !wake.released)) return showAwake();
+  try { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', showAwake); } catch {}
+  showAwake();
+}
+function showAwake() {
+  const s = current();
+  $('awake').hidden = !navigator.wakeLock || !!(wake && !wake.released) || !s || !!s.ended || !!s.stopped;
+}
+$('awake').onclick = keepAwake;
+addEventListener('pointerdown', keepAwake);
+document.addEventListener('visibilitychange', keepAwake);
 
 // ── wiring ──────────────────────────────────────────────────────────────────────────────────────────────────
 fillForm();
@@ -759,4 +777,5 @@ render();
 if (s && !s.ended) advance(s);
 else if (qs.get('run') === '1') startSuite(settingsFromForm());
 else status(s ? 'Last run finished. Start another below.' : 'Pick runtimes and press Start.');
+keepAwake();
 </script>
