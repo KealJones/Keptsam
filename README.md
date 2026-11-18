@@ -1,4 +1,4 @@
-<h1 align="center">~ Tilde</h1>
+<h1 align="center">Tilde~Engine</h1>
 
 <p align="center">A WebGPU engine that runs small language models in a browser tab, built to survive iPhone Safari.</p>
 
@@ -9,7 +9,7 @@ JavaScript, WebAssembly and every GPU buffer, and kills it (Jetsam) the moment i
 one command buffer runs past about **3 seconds**. Most browser runtimes hope to stay under those lines. Tilde is built
 around them.
 
-The name is the `~` in front of every limit it lives under: ~1.9 GB, ~3 s.
+The `~` is for the limits it lives under, which only ever come approximately: ~1.9 GB, ~3 s.
 
 ## What it gets you
 
