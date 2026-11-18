@@ -62,8 +62,9 @@ by design.
 
 ## Next runs
 
-- An `engine=webllm` option in [`bench/vs-wllama.html`](../bench/vs-wllama.html), so all three runtimes run on the
-  same day, phone and iOS.
-- Save `result.webgpu` at the `loaded` stage, so a killed wllama run still says where it ran.
+- [`bench/compare.html`](../bench/compare.html) runs all of them on one phone, one day: Tilde, WebLLM (stock and with
+  Squiggle's pacing), wllama on WebGPU and on the CPU, transformers.js and LiteRT-LM, each in a fresh page load, at
+  several prompt sizes. Every step is saved as it happens, so a killed tab is recorded with the stage it died in and
+  the GPU memory at the time, and the page moves on to the next test by itself.
 - Tilde with a 1,024-token prompt, and Tilde at 6K and 8K. If Tilde loads at 8K, that's a direct win over WebLLM,
   which died loading there.
