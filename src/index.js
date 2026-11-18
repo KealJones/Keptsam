@@ -345,9 +345,6 @@ export class Tilde {
   stats() { return this.gpu.report(); }
 }
 
-// Old name: Squiggle still calls k.Keptsam.load, so keep it until Squiggle moves to Tilde.
-export const Keptsam = Tilde;
-
 /**
  * Samples from GPU top candidates ({ values, ids }): repeat penalty, temperature, top-k, top-p; temperature 0 = greedy.
  * The penalty only lowers scores, so the penalized top-k is still among the candidates.

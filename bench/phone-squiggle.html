@@ -12,7 +12,7 @@
 </script>
 <script type="module">
 // Squiggle's own engine path on a real device, from a Squiggle build (?app=<its URL>, e.g. a PR preview on the same
-// origin): engine.js downloads and loads LFM3 Omni on Tilde (engine-keptsam.js under engine-webllm.js's shim), then
+// origin): engine.js downloads and loads LFM3 Omni on Tilde (engine-tilde.js under engine-webllm.js's shim), then
 // a tool call in LFM3's format with thinking, the tool's result read back with prompt reuse, a picture through a
 // ⟦media:id⟧ marker, a transcription and a spoken sentence (side sequence), with memory after each step.
 // ?steps=tools,image,hear,speak picks steps.
@@ -29,8 +29,8 @@ window.__squiggleCheck = results;
 try {
   const engine = await import(app + 'src/engine.js');
   const media = await import(app + 'src/media.js');
-  ks = await import(app + 'src/engine-keptsam.js');
-  log('Squiggle at', app, '· Tilde', ks.KEPTSAM_SHA.slice(0, 7));
+  ks = await import(app + 'src/engine-tilde.js');
+  log('Squiggle at', app, '· Tilde', ks.TILDE_SHA.slice(0, 7));
   let t = performance.now();
   await engine.download('KOMNI', (done, total) => bar(`downloading LFM3 Omni ${(done / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB (keep Safari open)`));
   log('downloaded (or already cached) in', secs(t));
