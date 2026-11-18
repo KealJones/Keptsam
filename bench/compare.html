@@ -252,9 +252,11 @@ async function startSuite(settings) {
 function settle(s) {
   const it = s.queue.find((q) => q.status === 'running');
   if (!it) return;
-  if (it.leftAt && it.attempts < 2) {
+  // A test that died while the page was hidden (phone locked, app switched) says nothing about the runtime: iOS
+  // suspends and kills background tabs. Try it once more.
+  if ((it.leftAt || it.result.hidden) && it.attempts < 2) {
     it.status = 'pending';
-    it.result.notes = [...(it.result.notes || []), 'the page was left while it ran; tried again'];
+    it.result = { notes: [...(it.result.notes || []), 'the page was hidden or left while it ran; tried again'] };
   } else {
     it.status = it.leftAt ? 'interrupted' : 'died';
     it.result.diedDuring = it.stages?.at(-1)?.[0] || 'starting';
@@ -370,6 +372,11 @@ async function runItem(s, it) {
   if (watch.errors.length) it.result.pageErrors = watch.errors;
   it.result.totalS = +((performance.now() - tStart) / 1000).toFixed(1);
   it.ended = new Date().toISOString();
+  if (it.status !== 'done' && it.result.hidden && it.attempts < 2) {
+    log(label(it), it.status, 'while the page was hidden; trying again', JSON.stringify(it.result));
+    it.status = 'pending';
+    it.result = { notes: ['failed while the page was hidden; tried again'] };
+  }
   if (it.status === 'lost-gpu') skipAfter(s, { ...it, status: 'error' });
   else skipAfter(s, it);
   save();
@@ -583,7 +590,10 @@ function wllamaRunner(gpu) {
     async prepare(c) {
       const lib = await import(BASE + 'index.js');
       const cache = new lib.CacheManager();
-      if ((await cache.open(GGUF).catch(() => null))?.size) return c.note({ already: true });
+      // A download cut off midway stays in wllama's cache at the wrong size; only a whole file counts.
+      const have = await cache.getSize(await cache.getNameFromURL(GGUF)).catch(() => -1);
+      if (have === GGUF_BYTES) return c.note({ already: true });
+      if (have > 0) { await cache.delete(GGUF).catch(() => {}); c.note({ notes: [`dropped a partial download (${MB(have)} MB)`] }); }
       c.stage('downloading');
       const t = now();
       await cache.download(GGUF, { progressCallback: ({ loaded, total }) => c.progress(`downloading ${MB(loaded)} of ${MB(total)} MB`) });
