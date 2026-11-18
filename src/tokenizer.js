@@ -55,6 +55,20 @@ export class Tokenizer {
 
   /** Token ids → text. */
   decode(ids, { special = true } = {}) {
+    return new TextDecoder().decode(this.#bytes(ids, special));
+  }
+
+  /**
+   * For streaming: returns a function that takes one token id at a time and gives back the text it adds.
+   * A character whose bytes are split across tokens (an emoji often is) comes out whole with the token that
+   * finishes it, instead of as U+FFFD and a stray half.
+   */
+  decoder({ special = true } = {}) {
+    const dec = new TextDecoder();
+    return (id) => dec.decode(this.#bytes([id], special), { stream: true });
+  }
+
+  #bytes(ids, special) {
     const bytes = [];
     for (const id of ids) {
       const t = this.tokens[id];
@@ -62,7 +76,7 @@ export class Tokenizer {
       if (this.specialIds.has(id)) { if (special) bytes.push(...ENC.encode(t)); continue; }
       for (const ch of t) { const b = CHAR2BYTE.get(ch); if (b !== undefined) bytes.push(b); else bytes.push(...ENC.encode(ch)); }
     }
-    return new TextDecoder().decode(new Uint8Array(bytes));
+    return new Uint8Array(bytes);
   }
 
   #splitSpecial(text) {

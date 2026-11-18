@@ -1,6 +1,6 @@
 {
   "name": "tilde",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "WebGPU engine for small language models that survives iPhone Safari",
   "type": "module",
   "main": "src/index.js",

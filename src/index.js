@@ -145,14 +145,13 @@ export class Tilde {
     o.onRead?.({ reused: start, read: fresh.length });
     this.history = [...items];
 
-    const out = [];
+    const next = this.tokenizer.decoder();
     let text = '';
     for (let n = 0; n < o.maxTokens; n++) {
       if (o.signal?.aborted) break;
       const id = sampleCandidates(await m.candidates(), this.history.slice(-64).filter((t) => typeof t === 'number'), o);
       if (id === this.tokenizer.eos || this.tokenizer.tokens[id] === '<|im_end|>') break;
-      out.push(id);
-      const piece = this.tokenizer.decode(out).slice(text.length);
+      const piece = next(id);
       text += piece;
       o.onToken?.(piece, id);
       if (o.stop.some((s) => text.endsWith(s))) break;

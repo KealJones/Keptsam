@@ -16,3 +16,11 @@ test('tokenizes like llama.cpp', { skip: !existsSync(MODEL) && 'model file not p
     assert.equal(tok.decode(ids), text, 'decode ' + JSON.stringify(text));
   }
 });
+
+test('streaming decode keeps an emoji split across tokens whole', () => {
+  // GPT-2 byte-level strings: 👋 is F0 9F 91 8B, split here into two tokens of two bytes each.
+  const tok = new Tokenizer({ tokens: ['Hi', 'Ġ', 'ðŁ', 'ĳĭ', '!'], merges: [] });
+  assert.equal(tok.decode([0, 1, 2, 3, 4]), 'Hi 👋!');
+  const next = tok.decoder();
+  assert.deepEqual([0, 1, 2, 3, 4].map(next), ['Hi', ' ', '', '👋', '!']);
+});
