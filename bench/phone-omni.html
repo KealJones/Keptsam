@@ -1,8 +1,8 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Keptsam: Omni check</title>
-<div id="kbar" style="position:sticky;top:0;background:#2a78d6;color:#fff;padding:10px;font:15px -apple-system,sans-serif;border-radius:8px;margin-bottom:8px">Keptsam: starting…</div>
+<title>Tilde: Omni check</title>
+<div id="kbar" style="position:sticky;top:0;background:#2a78d6;color:#fff;padding:10px;font:15px -apple-system,sans-serif;border-radius:8px;margin-bottom:8px">Tilde: starting…</div>
 <pre id="log" style="white-space:pre-wrap;font:12px ui-monospace,monospace"></pre>
 <script>
 (() => {
@@ -14,8 +14,8 @@
 // Omni on a real device: ?kind=image (bench/fixtures/test256.png) or ?kind=audio (bench/fixtures/test6.wav),
 // greedy, compared with llama.cpp's first 8 tokens. ?sha=<commit> loads the engine pinned via jsDelivr.
 const qs = new URLSearchParams(location.search);
-const base = qs.get('sha') ? `https://cdn.jsdelivr.net/gh/KealJones/Keptsam@${qs.get('sha')}/src/` : '../src/';
-const { Keptsam, parseWav, wav } = await import(base + 'index.js');
+const base = qs.get('sha') ? `https://cdn.jsdelivr.net/gh/KealJones/tilde@${qs.get('sha')}/src/` : '../src/';
+const { Tilde, parseWav, wav } = await import(base + 'index.js');
 const HF = 'https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF/resolve/main/';
 const kind = qs.get('kind') || 'audio';
 const CASES = {
@@ -23,17 +23,17 @@ const CASES = {
   audio: { prompt: 'Transcribe the audio.', want: [597, 1381, 2791, 9595, 487, 4604, 229, 1696] },
 };
 const log = (...a) => { const s = a.join(' '); document.getElementById('log').textContent += s + '\n'; console.log(s); };
-const bar = (s) => { document.getElementById('kbar').textContent = 'Keptsam: ' + s; };
+const bar = (s) => { document.getElementById('kbar').textContent = 'Tilde: ' + s; };
 try {
   const t0 = performance.now();
-  const llm = await Keptsam.load(HF + 'LFM3-Omni-2B-Q4_0.gguf', {
+  const llm = await Tilde.load(HF + 'LFM3-Omni-2B-Q4_0.gguf', {
     mmproj: HF + 'mmproj-LFM3-Omni-2B-Q8_0.gguf', ctx: 2048,
     onProgress: ({ loaded, total }) => bar(`loading Omni ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB (keep Safari open)`),
   });
-  window.keptsam = llm;
+  window.tilde = llm;
   log('loaded in', ((performance.now() - t0) / 1000).toFixed(1), 's', JSON.stringify(llm.stats()));
   if (kind === 'speak') {
-    const text = qs.get('text') || 'Hey Keal! This is Keptsam, speaking from your iPhone, on the GPU, with no server at all.';
+    const text = qs.get('text') || 'Hey Keal! This is Tilde, speaking from your iPhone, on the GPU, with no server at all.';
     const t1 = performance.now();
     let first = 0;
     const pcm = await llm.speak(text, {

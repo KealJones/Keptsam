@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync, openSync, readSync, statSync } from 'node:fs';
 import { readGGUF, archKey } from '../src/gguf.js';
 
-const MODEL = process.env.KEPTSAM_GGUF || '/home/claude/models/LFM3-1.7B-QAD-Q4_0.gguf';
+const MODEL = process.env.TILDE_GGUF || '/home/claude/models/LFM3-1.7B-QAD-Q4_0.gguf';
 const info = JSON.parse(readFileSync(new URL('./fixtures/info.json', import.meta.url)));
 
 function fileSource(path) {

@@ -1,6 +1,6 @@
-// Keptsam public API.
+// Tilde public API.
 //
-//   const llm = await Keptsam.load('https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf');
+//   const llm = await Tilde.load('https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf');
 //   const text = await llm.chat([{ role: 'user', content: 'hi' }], { onToken: (t) => print(t) });
 
 import { openGpu } from './gpu.js';
@@ -21,7 +21,7 @@ export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, LFM3Audio, LFM3Speech
 
 const roundEven = (x) => { const r = Math.round(x); return Math.abs(x % 1) === 0.5 && r % 2 ? r - 1 : r; };
 
-export class Keptsam {
+export class Tilde {
   /**
    * Loads a GGUF model onto the GPU, streaming it in.
    * @param {string | import('./gguf.js').ByteSource} source URL or byte source
@@ -35,7 +35,7 @@ export class Keptsam {
     gpu ||= await openGpu();
     const open = async (s) => (typeof s === 'string' && cache ? cachedSource(httpSource(s), { key: s }) : typeof s === 'string' ? httpSource(s) : s);
     const model = await LFM3.load(gpu, await open(source), { ctx, chunk, onProgress });
-    const k = new Keptsam(gpu, model);
+    const k = new Tilde(gpu, model);
     if (mmproj) {
       const src = await open(mmproj);
       k.encoders = { src, gguf: await readGGUF(src) };
@@ -344,6 +344,9 @@ export class Keptsam {
   /** Memory and timing report. */
   stats() { return this.gpu.report(); }
 }
+
+// Old name: Squiggle still calls k.Keptsam.load, so keep it until Squiggle moves to Tilde.
+export const Keptsam = Tilde;
 
 /**
  * Samples from GPU top candidates ({ values, ids }): repeat penalty, temperature, top-k, top-p; temperature 0 = greedy.

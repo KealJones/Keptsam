@@ -1,7 +1,7 @@
-# Keptsam design
+# Tilde design
 
-Keptsam runs small language models in a browser tab on WebGPU, built to survive iPhone Safari. iOS kills a tab
-that uses too much memory (Jetsam) or keeps the GPU busy too long; Keptsam is built around both limits instead of
+Tilde runs small language models in a browser tab on WebGPU, built to survive iPhone Safari. iOS kills a tab
+that uses too much memory (Jetsam) or keeps the GPU busy too long; Tilde is built around both limits instead of
 hoping to stay under them.
 
 First model: **LFM3 1.7B** (Liquid AI). Next: **LFM3 Omni 2B**, with vision, hearing and speech swapped in and out
@@ -85,7 +85,7 @@ connector (~123 MB), speech generator `a.gen` (~181 MB). Peak with swapping is t
 sense (~1.3 GB of weights), instead of everything at once (~1.6 GB), which crashed Liquid's own WebGPU Space on an
 iPhone at ~80% loaded.
 
-- **Video** (`src/video.js`, `Keptsam#readVideo`), as llama.cpp's `MTMD_VIDEO_TEMPLATE_LFM3_OMNI` reads it: 2 frames a
+- **Video** (`src/video.js`, `Tilde#readVideo`), as llama.cpp's `MTMD_VIDEO_TEMPLATE_LFM3_OMNI` reads it: 2 frames a
   second at `round(linspace(0, nSrc − 1, n))` of the source frames, n clamped to [4, 384]; frames go in pairs, one
   temporal patch each (the patchifier's two kernels: `W0·A + W1·B`; a still image is `W0·A + W1·A`). Each pair is
   `<t seconds>` (printf `%.1f`, ties to even), `<|vision_start|>` pair `<|vision_end|>`, then the pair's slice of the

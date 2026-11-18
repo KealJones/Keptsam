@@ -1,8 +1,8 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Keptsam in Squiggle: phone check</title>
-<div id="kbar" style="position:sticky;top:0;background:#2a78d6;color:#fff;padding:10px;font:15px -apple-system,sans-serif;border-radius:8px;margin-bottom:8px">Squiggle + Keptsam: starting…</div>
+<title>Tilde in Squiggle: phone check</title>
+<div id="kbar" style="position:sticky;top:0;background:#2a78d6;color:#fff;padding:10px;font:15px -apple-system,sans-serif;border-radius:8px;margin-bottom:8px">Squiggle + Tilde: starting…</div>
 <pre id="log" style="white-space:pre-wrap;font:12px ui-monospace,monospace"></pre>
 <script>
 (() => {
@@ -12,7 +12,7 @@
 </script>
 <script type="module">
 // Squiggle's own engine path on a real device, from a Squiggle build (?app=<its URL>, e.g. a PR preview on the same
-// origin): engine.js downloads and loads LFM3 Omni on Keptsam (engine-keptsam.js under engine-webllm.js's shim), then
+// origin): engine.js downloads and loads LFM3 Omni on Tilde (engine-keptsam.js under engine-webllm.js's shim), then
 // a tool call in LFM3's format with thinking, the tool's result read back with prompt reuse, a picture through a
 // ⟦media:id⟧ marker, a transcription and a spoken sentence (side sequence), with memory after each step.
 // ?steps=tools,image,hear,speak picks steps.
@@ -20,7 +20,7 @@ const qs = new URLSearchParams(location.search);
 const app = new URL(qs.get('app') || '/squiggle/', location.href).href;
 const steps = (qs.get('steps') || 'tools,image,hear,speak').split(',');
 const log = (...a) => { const s = a.join(' '); document.getElementById('log').textContent += s + '\n'; console.log(s); };
-const bar = (s, color) => { const b = document.getElementById('kbar'); b.textContent = 'Squiggle + Keptsam: ' + s; if (color) b.style.background = color; };
+const bar = (s, color) => { const b = document.getElementById('kbar'); b.textContent = 'Squiggle + Tilde: ' + s; if (color) b.style.background = color; };
 const secs = (t) => ((performance.now() - t) / 1000).toFixed(1) + ' s';
 let ks = null;
 const mem = () => { try { const st = ks && ks.stats(); return st ? `[GPU ${st.totalMB} MB now, ${st.peakMB} MB peak]` : ''; } catch { return ''; } };
@@ -30,7 +30,7 @@ try {
   const engine = await import(app + 'src/engine.js');
   const media = await import(app + 'src/media.js');
   ks = await import(app + 'src/engine-keptsam.js');
-  log('Squiggle at', app, '· Keptsam', ks.KEPTSAM_SHA.slice(0, 7));
+  log('Squiggle at', app, '· Tilde', ks.KEPTSAM_SHA.slice(0, 7));
   let t = performance.now();
   await engine.download('KOMNI', (done, total) => bar(`downloading LFM3 Omni ${(done / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB (keep Safari open)`));
   log('downloaded (or already cached) in', secs(t));

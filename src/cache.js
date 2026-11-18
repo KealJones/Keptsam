@@ -1,5 +1,7 @@
 // Caches a byte source in fixed 16 MB pieces with the Cache API, so a model downloads once.
 // Only one or two pieces are in memory at a time.
+// The cache name keptsam-v1 and the keptsam.cache keys keep the old name on purpose: renaming them would orphan
+// every model already downloaded, and Squiggle's service worker keeps keptsam-v1 and would delete a new name.
 
 const PIECE = 16 << 20;
 

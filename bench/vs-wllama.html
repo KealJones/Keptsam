@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Keptsam vs wllama</title>
+<title>Tilde vs wllama</title>
 <div id="kbar" style="position:sticky;top:0;background:#2a78d6;color:#fff;padding:10px;font:15px -apple-system,sans-serif;border-radius:8px;margin-bottom:8px">starting…</div>
 <pre id="log" style="white-space:pre-wrap;font:12px ui-monospace,monospace"></pre>
 <script>
@@ -12,10 +12,10 @@
 </script>
 <script type="module">
 // Same model, same prompt, same settings, one engine per page load:
-//   ?engine=keptsam|wllama  ?prompt=256 (prompt tokens)  ?gen=64  ?ctx=2048  ?sha=<commit> (pin Keptsam via jsDelivr)
+//   ?engine=tilde|wllama  ?prompt=256 (prompt tokens)  ?gen=64  ?ctx=2048  ?sha=<commit> (pin Tilde via jsDelivr)
 // Each stage is also written to localStorage ('vs-wllama'), so if iOS kills the tab the next load shows how far it got.
 const qs = new URLSearchParams(location.search);
-const engine = qs.get('engine') || 'keptsam';
+const engine = qs.get('engine') || 'tilde';
 const nPrompt = Number(qs.get('prompt') || 256), nGen = Number(qs.get('gen') || 64), ctx = Number(qs.get('ctx') || 2048);
 const MODEL = 'https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf';
 const WLLAMA = 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.13.0/esm/';
@@ -41,18 +41,18 @@ if (performance.getEntriesByType('navigation')[0]?.type === 'reload' && last?.ru
   throw new Error('previous run died');
 }
 
-// Shared prompt: exactly nPrompt tokens of the same text, built with Keptsam's tokenizer (identical to llama.cpp's
+// Shared prompt: exactly nPrompt tokens of the same text, built with Tilde's tokenizer (identical to llama.cpp's
 // for this model: tests/tokenizer.test.js), decoded back to a string so both engines get the same text.
 const TEXT = 'The history of the ocean is the history of life on Earth. Tides, currents and storms shape coastlines, carry heat from the equator toward the poles, and feed the plankton that sit at the base of almost every food web. '.repeat(64);
-const base = qs.get('sha') ? `https://cdn.jsdelivr.net/gh/KealJones/Keptsam@${qs.get('sha')}/src/` : '../src/';
+const base = qs.get('sha') ? `https://cdn.jsdelivr.net/gh/KealJones/tilde@${qs.get('sha')}/src/` : '../src/';
 const kx = await import(base + 'index.js');
 
 const result = { engine, nPrompt, nGen, ctx, ua: navigator.userAgent };
 try {
   stage('loading');
   let t0 = performance.now();
-  if (engine === 'keptsam') {
-    const llm = await kx.Keptsam.load(MODEL, { ctx, onProgress: ({ loaded, total }) => bar(`loading ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`) });
+  if (engine === 'tilde') {
+    const llm = await kx.Tilde.load(MODEL, { ctx, onProgress: ({ loaded, total }) => bar(`loading ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`) });
     result.loadS = +((performance.now() - t0) / 1000).toFixed(1);
     const m = llm.model, ids = llm.tokenizer.encode(TEXT).slice(0, nPrompt);
     stage('loaded', { loadS: result.loadS });
@@ -87,7 +87,7 @@ try {
     }
     result.compat = qs.get('compat') !== '0';
     result.webgpu = w.isSupportWebGPU();
-    // Tokenizer only (reads the GGUF header, a few MB, not the weights) so the prompt text matches Keptsam's.
+    // Tokenizer only (reads the GGUF header, a few MB, not the weights) so the prompt text matches Tilde's.
     const hdr = await (await import(base + 'gguf.js')).readGGUF(await kx.cachedSource(kx.httpSource(MODEL), { key: MODEL }));
     const tok = kx.Tokenizer.fromGGUF(hdr.kv);
     const text = tok.decode(tok.encode(TEXT).slice(0, nPrompt));

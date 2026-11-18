@@ -4,7 +4,7 @@ import { readFileSync, existsSync, openSync, readSync } from 'node:fs';
 import { readGGUF } from '../src/gguf.js';
 import { Tokenizer } from '../src/tokenizer.js';
 
-const MODEL = process.env.KEPTSAM_GGUF || '/home/claude/models/LFM3-1.7B-QAD-Q4_0.gguf';
+const MODEL = process.env.TILDE_GGUF || '/home/claude/models/LFM3-1.7B-QAD-Q4_0.gguf';
 const cases = JSON.parse(readFileSync(new URL('./fixtures/tokenize.json', import.meta.url)));
 
 test('tokenizes like llama.cpp', { skip: !existsSync(MODEL) && 'model file not present' }, async () => {

@@ -1,18 +1,18 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Keptsam: snapshot reuse and side sequence check</title>
+<title>Tilde: snapshot reuse and side sequence check</title>
 <pre id="log"></pre>
 <script type="module">
 // generate({ snapshotAt }) then a prompt that shares only the snapshot's tokens: it must go back to the snapshot and
 // give the same greedy tokens as reading the prompt from scratch. Then a side sequence runs in between and the main
 // conversation carries on as if it never happened.
-import { Keptsam } from '../src/index.js';
+import { Tilde } from '../src/index.js';
 const qs = new URLSearchParams(location.search);
 const log = (...a) => { const s = a.join(' '); document.getElementById('log').textContent += s + '\n'; console.log(s); };
 const abs = (p) => new URL(p, location.href).href;
 const greedy = { temperature: 0, repeatPenalty: 1, maxTokens: Number(qs.get('gen') || 2) };
 try {
-  const llm = await Keptsam.load(abs(qs.get('model') || '/models/LFM3-1.7B-QAD-Q4_0.gguf'), { cache: false, ctx: 256, chunk: 64 });
+  const llm = await Tilde.load(abs(qs.get('model') || '/models/LFM3-1.7B-QAD-Q4_0.gguf'), { cache: false, ctx: 256, chunk: 64 });
   const m = llm.model, tk = llm.tokenizer;
   const bos = tk.tokens[tk.bos];
   const turn = (q) => `${bos}<|im_start|>user\n${q}<|im_end|>\n<|im_start|>assistant\n<think></think>`;

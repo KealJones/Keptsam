@@ -1,9 +1,9 @@
-# Keptsam
+# Tilde
 
 **The model iOS didn't throw overboard.**
 
-Keptsam is a WebGPU engine for running small language models in a browser tab, built to survive iPhone Safari.
-On iOS, a tab that uses too much memory gets killed by Jetsam; Keptsam is what it keeps.
+Tilde is a WebGPU engine for running small language models in a browser tab, built to survive iPhone Safari.
+On iOS, a tab that uses too much memory gets killed by Jetsam; Tilde is built to stay under that line.
 
 It streams weights straight into GPU memory instead of holding the whole file, counts every byte it allocates,
 splits GPU work into short submits so WebKit's watchdog never fires, and (for multimodal models) only keeps

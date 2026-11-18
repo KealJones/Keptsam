@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Keptsam</title>
+<title>Tilde</title>
 <style>
   :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
   body { margin: 0; padding: max(12px, env(safe-area-inset-top)) 14px 14px; max-width: 760px; margin-inline: auto; }
@@ -19,7 +19,7 @@
   .think { color: GrayText; }
   #stats { font: 12px ui-monospace, monospace; color: GrayText; white-space: pre-wrap; margin-top: 8px; }
 </style>
-<h1>Keptsam</h1>
+<h1>Tilde</h1>
 <p class="tag">The model iOS didn't throw overboard. LFM3 on WebGPU, streamed straight into GPU memory.</p>
 
 <div class="row">
@@ -59,20 +59,20 @@
 })();
 </script>
 <script type="module">
-import { Keptsam, decodeAudio, readVideo, SPEECH_RATE } from '../src/index.js';
+import { Tilde, decodeAudio, readVideo, SPEECH_RATE } from '../src/index.js';
 
 const $ = (id) => document.getElementById(id);
 const stats = (extra = '') => { $('stats').textContent = (llm ? JSON.stringify(llm.stats(), null, 1) : '') + extra; };
 let llm = null;
 const messages = [];
-window.keptsam = { get llm() { return llm; }, messages };
+window.tilde = { get llm() { return llm; }, messages };
 
 $('load').onclick = async () => {
   $('load').disabled = true;
   const t0 = performance.now();
   try {
     const opt = $('model').selectedOptions[0];
-    llm = await Keptsam.load(opt.value, {
+    llm = await Tilde.load(opt.value, {
       ctx: Number($('ctx').value),
       mmproj: opt.dataset.mmproj,
       onProgress: ({ loaded, total }) => { $('bar').firstChild.style.width = (100 * loaded / total).toFixed(1) + '%'; $('stats').textContent = `loading ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`; },

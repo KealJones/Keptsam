@@ -7,7 +7,7 @@ import { join, extname, resolve } from 'node:path';
 const main = import.meta.url === `file://${process.argv[1]}`;
 const port = main ? Number(process.argv[2] || 8790) : 0;
 const mounts = [['/', resolve(new URL('..', import.meta.url).pathname)]];
-for (const a of [...(main ? process.argv.slice(3) : []), ...(process.env.KEPTSAM_MOUNTS || '').split(' ').filter(Boolean)]) { const [p, d] = a.split('='); mounts.unshift([p.endsWith('/') ? p : p + '/', resolve(d)]); }
+for (const a of [...(main ? process.argv.slice(3) : []), ...(process.env.TILDE_MOUNTS || '').split(' ').filter(Boolean)]) { const [p, d] = a.split('='); mounts.unshift([p.endsWith('/') ? p : p + '/', resolve(d)]); }
 const TYPES = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json' };
 
 export function serve() {
