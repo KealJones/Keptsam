@@ -259,6 +259,7 @@ function settle(s) {
     it.status = it.leftAt ? 'interrupted' : 'died';
     it.result.diedDuring = it.stages?.at(-1)?.[0] || 'starting';
     if (it.live?.gpuMB) it.result.gpuAtDeathMB = it.live.gpuMB;
+    if (it.live?.gpuPeakMB) it.result.gpuPeakMB = it.live.gpuPeakMB;
     if (it.live?.lost) it.result.gpuLost = it.live.lost;
     log(`${ENGINE[it.engine]?.name}: ${it.status} during "${it.result.diedDuring}"`);
   }
@@ -310,6 +311,7 @@ async function runItem(s, it) {
     it.stages.push([name, +((stageT - tStart) / 1000).toFixed(1)]);
     frames.phase = name;
     status(`${label(it)}: ${name}`);
+    console.log(`[compare] ${label(it)}: ${name} at ${it.stages.at(-1)[1]} s`);
     save();
   };
   stageNow = () => stageName;
@@ -333,6 +335,16 @@ async function runItem(s, it) {
   try {
     const engine = RUNNERS[it.engine];
     if (!engine) throw new Error('unknown runtime ' + it.engine);
+    // Right after a runtime crashes the GPU process, a browser can have no GPU to give for a while (Safari: ~11 s,
+    // Squiggle's REVIVE_WAITS). Wait for one, so a runtime isn't blamed for the one before it.
+    if (navigator.gpu && !['wllama-cpu', 'dry'].includes(it.engine)) {
+      stage('waiting for the GPU');
+      const t = now();
+      let a = null;
+      for (let i = 0; i < 30 && !(a = await navigator.gpu.requestAdapter().catch(() => null)); i++) await sleep(1000);
+      if (now() - t > 1500) c.note({ waitedForGpuS: S(now() - t) });
+      if (!a) throw new Error('no GPU adapter after 30 s (the test before this one may have crashed the GPU)');
+    }
     if (it.kind === 'prepare') await engine.prepare(c);
     else {
       const r = await engine.run(c);
@@ -349,6 +361,7 @@ async function runItem(s, it) {
     it.status = watch.lost ? 'lost-gpu' : 'error';
     it.result.error = String(e?.message || e).slice(0, 500);
     it.result.errorDuring = stageName;
+    it.result.gpuPeakMB = MB(gpuMem.peak) || null;
     log(label(it), 'ERROR', e?.stack || e);
   }
   clearInterval(beat);
@@ -450,7 +463,8 @@ const RUNNERS = {
     },
     async run(c) {
       const { lr, engine, loadS } = await litertLoad(c, 'loading');
-      const greedy = { type: lr.SamplerType?.GREEDY ?? 3 };
+      // Greedy as top-k 1: LiteRT-LM's GREEDY sampler type threw "divide by zero" in headless Chrome.
+      const greedy = { type: lr.SamplerType?.TOP_K ?? 1, k: 1, p: 1, temperature: 1 };
       c.stage('warm-up');
       const warm = await engine.createConversation({ sessionConfig: { samplerParams: greedy, maxOutputTokens: 2 } });
       for await (const _ of chunksOf(warm.sendMessageStreaming(WARM))) { /* drain */ }
@@ -647,6 +661,7 @@ function why(q) {
   if (r.gpuLost) bits.push(`GPU lost (${r.gpuLost.reason || '?'}${r.gpuLost.message ? ': ' + r.gpuLost.message : ''}) during ${r.gpuLost.during}`);
   if (r.gpuError) bits.push(`GPU error: ${r.gpuError.message}`);
   if (r.reason) bits.push(r.reason);
+  if (r.waitedForGpuS) bits.push(`waited ${r.waitedForGpuS} s for a GPU first`);
   if (r.hidden) bits.push('page was hidden for part of it');
   if (r.build) bits.push(r.build + (r.threads ? `, ${r.threads} thread${r.threads > 1 ? 's' : ''}` : ''));
   if (r.engineMB) bits.push(`Tilde counted ${r.engineMB} MB`);
