@@ -6,7 +6,7 @@
 
 A phone's browser tab is a hostile place for a 1 GB model. iOS gives the whole tab about **1.9 GB**, shared by
 JavaScript, WebAssembly and every GPU buffer, and kills it (Jetsam) the moment it goes over
-([measured on an iPhone 16](https://github.com/KealJones/squiggle/blob/main/app/memcap.html); WebKit's engineers on
+([measured on an iPhone 16](https://github.com/KealJones/lm-experiments/blob/main/experiments/memcap/README.md); WebKit's engineers on
 the OS limit: [bug 268816](https://bugs.webkit.org/show_bug.cgi?id=268816)). WebKit drops the GPU if one command buffer
 runs past about **3 seconds** ([WebKit's watchdog](https://github.com/WebKit/WebKit/blob/main/Source/WebGPU/WebGPU/Queue.mm#L492-L494),
 which logs "did not complete within 3s timeout"; the same crash in
@@ -56,6 +56,21 @@ flowchart LR
   S -->|"repack to GPU layout"| G["GPU buffer<br/>counted by the allocator"]
   G --> M["Model: short submits,<br/>senses swapped in on demand"]
 ```
+
+## Next to the other runtimes
+
+The same LFM3 1.7B on the same iPhone 16 in Safari, Nov 2026. Details, sources and caveats are in
+[docs/compared.md](docs/compared.md).
+
+| Runtime | Result | Speed | How it ended |
+|---|---|---|---|
+| **Tilde** | ✅ runs | 51 tok/s reading, 12.6 writing | 1,123 MB at 4K, matches llama.cpp |
+| **WebLLM** (our own MLC build) | ✅ with patches | 13.7 tok/s writing (before iOS 27.2.1) | Needs paced prefill since iOS 27.2.1; 8K killed the tab |
+| **wllama 3.13** (llama.cpp, WebAssembly) | ❌ | – | Default build won't compile on iOS 27.2; forced Safari build got the tab killed |
+| **transformers.js** (ONNX, WebGPU) | ❌ | – | Never finished downloading; 3 of 4 tries killed the tab |
+
+Tilde isn't the fastest writer or the smallest in memory. It's the one that stays up on iOS 27 without patches,
+needs no compile jobs, reads Liquid's official GGUFs as they are and swaps senses in and out.
 
 ## Quick start
 
