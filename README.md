@@ -1,7 +1,6 @@
 <h1 align="center">~ Tilde</h1>
 
-<p align="center"><b>The model iOS didn't throw overboard.</b><br>
-A WebGPU engine that runs small language models in a browser tab, built to survive iPhone Safari.</p>
+<p align="center">A WebGPU engine that runs small language models in a browser tab, built to survive iPhone Safari.</p>
 
 <p align="center"><a href="#quick-start">Quick start</a> · <a href="docs/design.md">Design doc</a> · <a href="bench/">Benchmarks and checks</a></p>
 
