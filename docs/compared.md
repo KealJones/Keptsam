@@ -52,6 +52,12 @@ sooner (1.7 s against 2.5), while WebLLM wrote 5% faster (12.7 against 12.1). We
 1,024 run; Tilde finished 1,024 (149 / 11.4) and 3,072 (115 / 8.9). An earlier WebLLM run that afternoon
 ([run](runs/2026-11-19-iphone16-lfm3-webllm.md)) was on Low Power Mode and doesn't count.
 
+**Tilde and paced WebLLM taking turns (Nov 19, normal power, [run](runs/2026-11-19-iphone16-lfm3-vs-webllm-paced.md)):**
+both finished every size. Tilde (256-token chunks) read 1.57× (256), 1.63× (1,024) and 1.75× (3,072) faster — 155 /
+156 / 141 against 99 / 96 / 80 tok/s — and reached the first token in 21.8 s against 38.2 s at 3,072. Writing was
+even (12.3 / 12.0 / 10.7 against 12.5 / 11.8 / 10.2). WebLLM loaded faster (~4 s against ~5.6 s) in ~50 MB less
+memory.
+
 ## Qwen3 0.6B: one phone, two passes (Nov 19, 2026)
 
 The same bench with a model a third the size. Tilde and wllama read ggml-org's pure Q4_0 GGUF; WebLLM ran its own
