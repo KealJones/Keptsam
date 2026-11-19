@@ -77,7 +77,9 @@ Kernels read `u32` and use `unpack2x16float`, so `shader-f16` is optional.
 | token table / head (Q6_K) | ~215 |
 | KV cache at 6K (f16) | ~75 |
 
-Later savings, measured before adopting: English-only vocab trim (~160 MB off the table), f16 KV vs f32.
+KV entries are stored as f16 pairs in `u32` (llama.cpp's default type too): half of f32, which matters most for
+models where every layer has a cache (Qwen3 0.6B: ~470 MB instead of ~940 MB at a 4K context). Later savings,
+measured before adopting: English-only vocab trim (~160 MB off the table).
 
 ## Omni
 

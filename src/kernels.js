@@ -174,21 +174,23 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   V[base + i + 64u] = a * s + b * c;
 }`;
 
-/** Writes K and V rows [T, KVH, 128] into ring caches of `slots` slots at position pos0 + t. */
+/** Writes K and V rows [T, KVH, 128] into ring caches of `slots` slots at position pos0 + t, as f16 pairs in u32
+ * (llama.cpp's default KV type, and half the memory). */
 export const kvWriteFor = (KVH) => /* wgsl */ `
 struct P { pos0: u32, slots: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> K: array<f32>;
 @group(0) @binding(2) var<storage, read> Vv: array<f32>;
-@group(0) @binding(3) var<storage, read_write> KC: array<f32>;
-@group(0) @binding(4) var<storage, read_write> VC: array<f32>;
+@group(0) @binding(3) var<storage, read_write> KC: array<u32>;
+@group(0) @binding(4) var<storage, read_write> VC: array<u32>;
 @compute @workgroup_size(128)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let t = wid.x;
   let slot = (p.pos0 + t) % p.slots;
-  for (var i = lid.x; i < ${KVH * 128}u; i += 128u) {
-    KC[slot * ${KVH * 128}u + i] = K[t * ${KVH * 128}u + i];
-    VC[slot * ${KVH * 128}u + i] = Vv[t * ${KVH * 128}u + i];
+  for (var i = lid.x; i < ${KVH * 64}u; i += 128u) {
+    let s = t * ${KVH * 128}u + 2u * i;
+    KC[slot * ${KVH * 64}u + i] = pack2x16float(vec2<f32>(K[s], K[s + 1u]));
+    VC[slot * ${KVH * 64}u + i] = pack2x16float(vec2<f32>(Vv[s], Vv[s + 1u]));
   }
 }`;
 export const kvWrite = kvWriteFor(4);
@@ -205,7 +207,7 @@ export const attnScoresFor = (H, KVH) => /* wgsl */ `
 struct P { pos0: u32, T: u32, slots: u32, L: u32, window: u32, sStride: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> Q: array<f32>;
-@group(0) @binding(2) var<storage, read> KC: array<f32>;
+@group(0) @binding(2) var<storage, read> KC: array<u32>;
 @group(0) @binding(3) var<storage, read_write> S: array<f32>;
 ${SLOTPOS}
 @compute @workgroup_size(64)
@@ -220,7 +222,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (kp >= 0 && kp <= qp && u32(qp - kp) < p.window) {
     let qb = th * 128u; let kb = j * ${KVH * 128}u + (h / ${H / KVH}u) * 128u;
     var acc = 0.0;
-    for (var d = 0u; d < 128u; d++) { acc += Q[qb + d] * KC[kb + d]; }
+    for (var d = 0u; d < 64u; d++) {
+      let k = unpack2x16float(KC[kb / 2u + d]);
+      acc += Q[qb + 2u * d] * k.x + Q[qb + 2u * d + 1u] * k.y;
+    }
     s = acc * 0.08838834764831845;
   }
   S[th * p.sStride + j] = s;
@@ -254,7 +259,7 @@ export const attnOutFor = (H, KVH, gated = true) => /* wgsl */ `
 struct P { L: u32, sStride: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> S: array<f32>;
-@group(0) @binding(2) var<storage, read> VC: array<f32>;
+@group(0) @binding(2) var<storage, read> VC: array<u32>;
 ${gated ? `@group(0) @binding(3) var<storage, read> G: array<f32>;
 @group(0) @binding(4) var<storage, read_write> O: array<f32>;` : '@group(0) @binding(3) var<storage, read_write> O: array<f32>;'}
 @compute @workgroup_size(128)
@@ -263,7 +268,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   var acc = 0.0;
   for (var j = 0u; j < p.L; j++) {
     let w = S[th * p.sStride + j];
-    if (w != 0.0) { acc += w * VC[j * ${KVH * 128}u + (h / ${H / KVH}u) * 128u + d]; }
+    if (w != 0.0) { let e = j * ${KVH * 128}u + (h / ${H / KVH}u) * 128u + d; let v = unpack2x16float(VC[e / 2u]); acc += w * select(v.x, v.y, (e & 1u) == 1u); }
   }
 ${gated ? `  let g = 1.0 / (1.0 + exp(-G[th]));
   O[th * 128u + d] = acc * g;` : '  O[th * 128u + d] = acc;'}

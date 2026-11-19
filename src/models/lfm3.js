@@ -85,7 +85,7 @@ export class LFM3 {
     return this.layers.map((L) => {
       if (L.attn) {
         const slots = L.swa ? this.swaSlots : ctx;
-        return { slots, swa: L.swa, k: f(slots * 512, 'kv'), v: f(slots * 512, 'kv') };
+        return { slots, swa: L.swa, k: f(slots * 256, 'kv'), v: f(slots * 256, 'kv') }; // f16 pairs
       }
       return { state: f(6 * this.nEmbd, 'conv-state') };
     });

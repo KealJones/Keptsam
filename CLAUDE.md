@@ -39,3 +39,4 @@ SwiftShader is slow (~80 s per token for LFM3 1.7B on 2 cores, ~17 s for Qwen3 0
 Baselines on "The capital of France is":
 - LFM3 1.7B QAD Q4_0 (Nov 16, 2026): top 5 identical, max |logit diff| 0.50, 12/12 greedy tokens identical.
 - Qwen3 0.6B Q4_0, ggml-org (Nov 18, 2026): top 5 identical, max |logit diff| 0.43, 8/8 greedy tokens identical.
+- With the f16 KV cache (Nov 18, 2026): LFM3 0.494 and Qwen3 0.426, top 5 and greedy tokens still identical.

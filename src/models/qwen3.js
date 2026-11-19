@@ -86,7 +86,7 @@ export class Qwen3 {
   // KV for every layer: ctx slots each (no sliding window, no conv state).
   #allocCache(ctx) {
     return Array.from({ length: this.nLayer }, () => ({
-      slots: ctx, k: this.gpu.buffer(ctx * this.kvDim * 4, 'kv'), v: this.gpu.buffer(ctx * this.kvDim * 4, 'kv'),
+      slots: ctx, k: this.gpu.buffer(ctx * this.kvDim * 2, 'kv'), v: this.gpu.buffer(ctx * this.kvDim * 2, 'kv'), // f16
     }));
   }
 
