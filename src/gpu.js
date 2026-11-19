@@ -34,7 +34,13 @@ export class Gpu {
     /** Longest single submit seen, in ms. */
     this.longestSubmit = 0;
     this.lost = null;
-    device.lost.then((info) => { this.lost = info; });
+    // After WebKit's watchdog takes the device, onSubmittedWorkDone and mapAsync never settle; every wait races this
+    // so a lost GPU fails fast instead of hanging.
+    this.whenLost = device.lost.then((info) => {
+      this.lost = info;
+      throw Object.assign(new Error(`GPU lost: ${info.message || info.reason}`), { gpuLost: info });
+    });
+    this.whenLost.catch(() => {});
     // Per-submit uniforms: every dispatch gets a 256-byte slot in one buffer, written once before the submit,
     // instead of a new GPUBuffer per dispatch (each one is a round trip to Safari's GPU process).
     this.SLOTS = 2048;
@@ -138,13 +144,20 @@ export class Gpu {
     f.slot = 0;
   }
 
+  /** Waits for p, or throws as soon as the device is lost. */
+  #orLost(p) { return Promise.race([p, this.whenLost]); }
+
+  /** Waits for all submitted work, or throws as soon as the device is lost. */
+  done() { return this.#orLost(this.device.queue.onSubmittedWorkDone()); }
+
   async run(record, enc = this.device.createCommandEncoder()) {
+    if (this.lost) throw new Error(`GPU lost: ${this.lost.message || this.lost.reason}`);
     record(enc);
     this.endPass();
     const t0 = performance.now();
     this.flush();
     this.device.queue.submit([enc.finish()]);
-    await this.device.queue.onSubmittedWorkDone();
+    await this.#orLost(this.device.queue.onSubmittedWorkDone());
     const ms = performance.now() - t0;
     this.longestSubmit = Math.max(this.longestSubmit, ms);
     if (this.lost) throw new Error(`GPU lost: ${this.lost.message || this.lost.reason}`);
@@ -157,7 +170,7 @@ export class Gpu {
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(buf, offset, staging, 0, size);
     this.device.queue.submit([enc.finish()]);
-    await staging.mapAsync(GPUMapMode.READ);
+    await this.#orLost(staging.mapAsync(GPUMapMode.READ));
     const out = staging.getMappedRange().slice(0);
     staging.unmap();
     staging.destroy();

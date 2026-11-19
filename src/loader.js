@@ -67,10 +67,10 @@ export async function streamTensors(gpu, src, tensors, { tag = 'weights', onProg
     out[t.name] = rec;
     loaded += t.nbytes;
     // Let the GPU take the writes before reading more, so staging copies don't pile up.
-    if (loaded % (64 << 20) < t.nbytes) await q.onSubmittedWorkDone();
+    if (loaded % (64 << 20) < t.nbytes) await gpu.done();
     onProgress?.({ loaded, total, tensor: t.name });
   }
-  await q.onSubmittedWorkDone();
+  await gpu.done();
   return out;
 }
 

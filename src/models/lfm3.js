@@ -129,7 +129,7 @@ export class LFM3 {
     }
     this.#copyState(true);
     this.snap.pos = this.pos;
-    await gpu.device.queue.onSubmittedWorkDone();
+    await gpu.done();
   }
 
   /** Goes back to the last snapshot() of this sequence. */
@@ -137,7 +137,7 @@ export class LFM3 {
     if (!this.snap || this.snap.seq !== this.seq) throw new Error('no snapshot of this sequence');
     this.#copyState(false);
     this.pos = this.snap.pos;
-    await this.gpu.device.queue.onSubmittedWorkDone();
+    await this.gpu.done();
   }
 
   #copyState(save) {
