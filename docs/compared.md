@@ -136,7 +136,9 @@ by design.
 - Rerun the two WebLLM deaths (both while loading) and repeat every cell three times, with a fixed GPU workload
   timed before each test, so heat and leftover memory stop deciding results.
 - Tilde at 6K and 8K. If Tilde loads at 8K, that's a direct win over WebLLM, which died loading there on Nov 15.
-- Prompt reading: LiteRT-LM reads Qwen3 prompts 4.5–7× faster than Tilde on the same phone; find out how (bigger
-  matmul tiles, f16 math where the GPU has it) without giving up the sized submits.
+- Prompt reading: LiteRT-LM reads Qwen3 prompts 4.5–7× faster than Tilde on the same phone. Bigger batches aren't
+  it: 256-token chunks with a 2 s budget read only 6–10% faster than the default 64 and 1 s, and a 4 s budget lost
+  the GPU ([run](runs/2026-11-19-iphone16-qwen3-chunks.md)). The gap is in the matmul kernels (tiling, f16 math
+  where the GPU has it).
 - Faster attention over long contexts: split each head's walk over the cache across workgroups.
 - Close the reading-speed gap: at 1,024 tokens WebLLM reads ~1.9× faster.
