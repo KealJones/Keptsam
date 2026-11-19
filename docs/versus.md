@@ -8,7 +8,7 @@ JavaScript, WebAssembly and the GPU; ~3 s per GPU command buffer).
 - [wllama (llama.cpp)](#wllama-the-recipe-is-there-the-stack-underneath-isnt)
 - [WebLLM (MLC)](#webllm-faster-until-ios-27-stops-it)
 - [transformers.js (ONNX)](#transformersjs-the-generic-runner)
-- [LiteRT-LM (Google)](#litert-lm-memory-while-loading)
+- [LiteRT-LM (Google)](#litert-lm-the-fastest-until-the-prompt-gets-long)
 
 ## What a model file holds, and what the engine has to know
 
@@ -62,13 +62,19 @@ tab was killed while loading both times on Nov 18, as in three of four earlier t
 in 16 MB pieces and repacks each tensor through one small staging buffer, so loading never holds more than the GPU
 weights so far plus that buffer ([design.md](design.md#principles)).
 
-## LiteRT-LM: memory while loading
+## LiteRT-LM: the fastest, until the prompt gets long
 
 ![LiteRT-LM passed 1,593 MB of GPU buffers while loading and was killed; Tilde holds 1,124 MB for the whole run](versus/litert.svg)
 
 Google's LiteRT-LM does have an LFM3 build, and it loaded and ran it in headless Chrome on a computer. On the iPhone it was killed while
 loading, with 1,593 MB of GPU buffers allocated: more than Tilde holds for the whole model at a 4K context
 (1,124 MB, counted the same way by the bench, [run](runs/2026-11-18-iphone16-lfm3.md)).
+
+With the smaller Qwen3 0.6B it loaded, and it was the fastest runtime on the phone by a wide margin: 610–803 tokens a
+second reading the prompt (Tilde: 116–134) and 33–38 writing (Tilde: 22–27), in 1,496 MB (Tilde: 873). At a
+3,072-token prompt it lost the GPU while reading ("timeout was reached while reading back data"), where Tilde
+finished ([run](runs/2026-11-19-iphone16-qwen3-pass2.md)). So LiteRT-LM is the speed to chase; Tilde's edge is
+finishing long prompts in less memory.
 
 ---
 
