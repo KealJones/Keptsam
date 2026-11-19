@@ -275,6 +275,92 @@ ${gated ? `  let g = 1.0 / (1.0 + exp(-G[th]));
 }`;
 export const attnOut = attnOutFor(16, 4);
 
+/**
+ * Fused prompt attention (flash style): O[t, h, :] = softmax(q·K / √128, masked) · V, times sigmoid(G[t, h]) when `gated`.
+ * One workgroup per KV head and 16 query rows (16/G tokens × the G = H/KVH heads sharing that KV head). K and V stream
+ * through shared memory 16 keys at a time with a running max and sum, so the T×H×L score matrix is never written.
+ * Same masks as attnScoresFor (causal, window, ring slots). Grid: [ceil(T / (16/G)), KVH].
+ */
+export const attnFlashFor = (H, KVH, gated = true) => {
+  const G = H / KVH, BT = 16 / G;
+  return /* wgsl */ `
+struct P { pos0: u32, T: u32, slots: u32, L: u32, window: u32, pad0: u32, pad1: u32, pad2: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> Q: array<f32>;
+@group(0) @binding(2) var<storage, read> KC: array<u32>;
+@group(0) @binding(3) var<storage, read> VC: array<u32>;
+${gated ? `@group(0) @binding(4) var<storage, read> Gt: array<f32>;
+@group(0) @binding(5) var<storage, read_write> O: array<f32>;` : '@group(0) @binding(4) var<storage, read_write> O: array<f32>;'}
+${SLOTPOS}
+var<workgroup> Qs: array<f32, 2048>;  // 16 rows × 128
+var<workgroup> KV: array<u32, 1040>;  // 16 keys × 64 f16 pairs, row stride 65 (no bank conflicts); K, then V
+var<workgroup> Ps: array<f32, 256>;   // 16 rows × 16 scores
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let i = lid.x; let kvh = wid.y; let t0 = wid.x * ${BT}u;
+  for (var e = i; e < 2048u; e += 256u) {
+    let r = e / 128u; let t = t0 + r / ${G}u; let h = kvh * ${G}u + r % ${G}u;
+    Qs[e] = select(0.0, Q[min((t * ${H}u + h) * 128u + e % 128u, arrayLength(&Q) - 1u)], t < p.T);
+  }
+  let r = i / 16u; let c = i % 16u;  // scores: row r, key c; output: row r, dim pairs c + 16n
+  let qp = i32(p.pos0 + t0 + r / ${G}u);
+  let maxPos = p.pos0 + p.T - 1u;
+  var acc = array<vec2<f32>, 4>(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
+  var m = -3.0e38; var l = 0.0;
+  for (var j0 = 0u; j0 < p.L; j0 += 16u) {
+    workgroupBarrier();
+    for (var e = i; e < 1024u; e += 256u) {
+      let j = j0 + e / 64u;
+      KV[(e / 64u) * 65u + e % 64u] = select(0u, KC[min(j, p.L - 1u) * ${KVH * 64}u + kvh * 64u + e % 64u], j < p.L);
+    }
+    workgroupBarrier();
+    let j = j0 + c;
+    var s = -3.0e38;
+    let kp = slotPos(j, maxPos, p.slots);
+    if (j < p.L && kp >= 0 && kp <= qp && u32(qp - kp) < p.window) {
+      var a = 0.0;
+      for (var d = 0u; d < 64u; d++) {
+        let k = unpack2x16float(KV[c * 65u + d]);
+        a += Qs[r * 128u + 2u * d] * k.x + Qs[r * 128u + 2u * d + 1u] * k.y;
+      }
+      s = a * 0.08838834764831845;
+    }
+    Ps[i] = s;
+    workgroupBarrier();
+    for (var e = i; e < 1024u; e += 256u) {
+      let jv = j0 + e / 64u;
+      KV[(e / 64u) * 65u + e % 64u] = select(0u, VC[min(jv, p.L - 1u) * ${KVH * 64}u + kvh * 64u + e % 64u], jv < p.L);
+    }
+    workgroupBarrier();
+    // Every thread of row r keeps the same running max and sum (same inputs, same order).
+    var mn = m;
+    for (var k = 0u; k < 16u; k++) { mn = max(mn, Ps[r * 16u + k]); }
+    let corr = exp(m - mn);
+    l *= corr;
+    for (var n = 0u; n < 4u; n++) { acc[n] *= corr; }
+    for (var k = 0u; k < 16u; k++) {
+      let sv = Ps[r * 16u + k];
+      if (sv > -1.0e38) {
+        let w = exp(sv - mn);
+        l += w;
+        for (var n = 0u; n < 4u; n++) { acc[n] += w * unpack2x16float(KV[k * 65u + c + 16u * n]); }
+      }
+    }
+    m = mn;
+  }
+  let t = t0 + r / ${G}u; let h = kvh * ${G}u + r % ${G}u;
+  if (t < p.T) {
+    let th = t * ${H}u + h;
+    let g = ${gated ? '1.0 / (1.0 + exp(-Gt[th]))' : '1.0'} / l;
+    for (var n = 0u; n < 4u; n++) {
+      let d = 2u * (c + 16u * n);
+      O[th * 128u + d] = acc[n].x * g; O[th * 128u + d + 1u] = acc[n].y * g;
+    }
+  }
+}`;
+};
+export const attnFlash = attnFlashFor(16, 4);
+
 /** LFM short conv over T tokens: Y = C ⊙ conv7(B ⊙ X), keeping the last 6 inputs per channel as state. */
 export const shortconv = /* wgsl */ `
 struct P { T: u32, N: u32, pad0: u32, pad1: u32 }
