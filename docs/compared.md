@@ -1,7 +1,8 @@
 # Tilde next to the other browser runtimes
 
 Every runtime below ran the same model, Liquid AI's **LFM3 1.7B** (4-bit), in Safari on one iPhone 16, Nov 2026.
-The rows link to where each result is recorded. Results that were seen but never written down are left out on
+The rows link to where each result is recorded. [versus.md](versus.md) explains, with diagrams, why each runtime
+breaks where it does. Results that were seen but never written down are left out on
 purpose; [Next runs](#next-runs) lists what would fill the gaps.
 
 ## Head to head: one phone, one day (Nov 18, 2026)

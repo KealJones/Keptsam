@@ -61,7 +61,8 @@ flowchart LR
 
 The same LFM3 1.7B on one iPhone 16, Safari 27.2, Nov 18, 2026, from [bench/compare.html](bench/compare.html):
 each runtime in a fresh page, same text, 64 tokens written. Speeds in tokens per second (read / write); one run per
-cell. Details and caveats are in [docs/compared.md](docs/compared.md).
+cell. Details and caveats are in [docs/compared.md](docs/compared.md); why each one breaks, with diagrams, is in
+[docs/versus.md](docs/versus.md).
 
 | Runtime | 256-token prompt | 1,024 | 3,072 |
 |---|---|---|---|
