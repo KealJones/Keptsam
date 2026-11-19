@@ -61,12 +61,13 @@ flowchart LR
 
 The same LFM3 1.7B on one iPhone 16, Safari 27.2, Nov 18, 2026, from [bench/compare.html](bench/compare.html):
 each runtime in a fresh page, same text, 64 tokens written. Speeds in tokens per second (read / write); one run per
-cell. Details and caveats are in [docs/compared.md](docs/compared.md); why each one breaks, with diagrams, is in
+cell (Tilde's Nov 19 row is a later run on the same phone, [details](docs/runs/2026-11-19-iphone16-lfm3-kernels.md)). Details and caveats are in [docs/compared.md](docs/compared.md); why each one breaks, with diagrams, is in
 [docs/versus.md](docs/versus.md).
 
 | Runtime | 256-token prompt | 1,024 | 3,072 |
 |---|---|---|---|
-| **Tilde** | ✅ 50 / 12.0 | ✅ 34.9 / 6.9 | ✅ 40.8 / 8.6 |
+| **Tilde**, Nov 19 kernels, 256-token chunks | ✅ 156.8 / 12.3 | ✅ 157 / 12.0 | ✅ 143.9 / 11.1 |
+| **Tilde**, Nov 18 | ✅ 50 / 12.0 | ✅ 34.9 / 6.9 | ✅ 40.8 / 8.6 |
 | **WebLLM** (our MLC build), stock | ✅ 84.4 / 12.3 | 💀 killed while loading | – |
 | **WebLLM** + Squiggle's pacing | ✅ 75.5 / 12.1 | ✅ 66.7 / 8.4 | 💀 killed while loading |
 | **wllama 3.13** WebGPU | 💀 killed while loading | – | – |

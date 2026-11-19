@@ -40,6 +40,12 @@ What this run says, and doesn't:
 
 Full table with every note: [runs/2026-11-18-iphone16-lfm3.md](runs/2026-11-18-iphone16-lfm3.md).
 
+**After the kernel rewrite (Nov 19 afternoon, [run](runs/2026-11-19-iphone16-lfm3-kernels.md)):** Tilde reads LFM3
+prompts at 139 tok/s (256 tokens, default) and 157 / 157 / 144 with 256-token chunks: 2.8–4.5× faster than Nov 18 and
+faster than WebLLM's 84 (stock, 256) and 67 (paced, 1,024). First token on a 3,072-token prompt: 75 s → 21 s.
+Writing is unchanged (12 tok/s at 256). The default configuration's 1,024 run was killed while loading, below its own
+steady memory; it needs a rerun.
+
 ## Qwen3 0.6B: one phone, two passes (Nov 19, 2026)
 
 The same bench with a model a third the size. Tilde and wllama read ggml-org's pure Q4_0 GGUF; WebLLM ran its own
