@@ -66,7 +66,8 @@ cell (Tilde's Nov 19 row is a later run on the same phone, [details](docs/runs/2
 
 | Runtime | 256-token prompt | 1,024 | 3,072 |
 |---|---|---|---|
-| **Tilde**, Nov 19 kernels, 256-token chunks | ✅ 156.8 / 12.3 | ✅ 157 / 12.0 | ✅ 143.9 / 11.1 |
+| **Tilde**, Nov 19 kernels | ✅ 138.2 / 12.3 | ✅ 137 / 11.9 | ✅ 119.4 / 10.4 |
+| **Tilde**, Nov 19 kernels, 256-token chunks | ✅ 156.6 / 12.3 | ✅ 152.2 / 11.6 | ✅ 124.8 / 10.0 |
 | **Tilde**, Nov 18 | ✅ 50 / 12.0 | ✅ 34.9 / 6.9 | ✅ 40.8 / 8.6 |
 | **WebLLM** (our MLC build), stock | ✅ 84.4 / 12.3 | 💀 killed while loading | – |
 | **WebLLM** + Squiggle's pacing | ✅ 75.5 / 12.1 | ✅ 66.7 / 8.4 | 💀 killed while loading |
