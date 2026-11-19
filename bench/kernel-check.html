@@ -19,7 +19,7 @@ function randomQ4_0(rows, K) {
   return b;
 }
 
-async function gemmCase(gpu, rows, Kd, T) {
+async function gemmCase(gpu, rows, Kd, T, name = 'gemmQ4_0', tile = 32) {
   const raw = randomQ4_0(rows, Kd);
   const { qs, d, blocks } = repackQ4_0(raw);
   const W = gpu.buffer(blocks * 16 + Math.ceil(blocks / 2) * 4);
@@ -27,7 +27,7 @@ async function gemmCase(gpu, rows, Kd, T) {
   const x = rnd(T * Kd), X = gpu.buffer(x.length * 4); gpu.device.queue.writeBuffer(X, 0, x);
   const Y = gpu.buffer(T * rows * 4);
   const u = gpu.uniform(new Uint32Array([rows, Kd, T, blocks * 4, rows, 0, Kd, 0]));
-  await gpu.run((enc) => gpu.dispatch(enc, K.gemmQ4_0, [u, W, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 32)]));
+  await gpu.run((enc) => gpu.dispatch(enc, K[name], [u, W, X, Y], [Math.ceil(rows / 64), Math.ceil(T / tile)]));
   const y = new Float32Array(await gpu.read(Y, T * rows * 4));
   const w = dequantQ4_0(raw);
   let maxd = 0, maxv = 0;
@@ -37,7 +37,7 @@ async function gemmCase(gpu, rows, Kd, T) {
   }
   for (const b of [W, X, Y]) gpu.free(b);
   const ok = maxd <= 1e-4 * Math.max(1, maxv);
-  log(`gemmQ4_0 rows ${rows} K ${Kd} T ${T}: max |diff| ${maxd.toExponential(2)} (max |y| ${maxv.toFixed(2)})`, ok ? 'ok' : 'FAIL');
+  log(`${name} rows ${rows} K ${Kd} T ${T}: max |diff| ${maxd.toExponential(2)} (max |y| ${maxv.toFixed(2)})`, ok ? 'ok' : 'FAIL');
   return ok;
 }
 
@@ -103,6 +103,7 @@ try {
   for (const n of [256, 1000, 128000]) ok = (await topkCase(gpu, n)) && ok;
   for (const [r, k, t] of [[10, 64, 3], [1000, 1024, 17], [151936, 1024, 2]]) ok = (await embedQ4Case(gpu, r, k, t)) && ok;
   for (const [r, k, t] of [[64, 64, 32], [100, 96, 5], [200, 256, 33], [130, 128, 64], [7, 32, 70]]) ok = (await gemmCase(gpu, r, k, t)) && ok;
+  for (const [r, k, t] of [[64, 64, 64], [100, 96, 5], [200, 256, 33], [130, 128, 64], [7, 32, 70], [1024, 1024, 130]]) ok = (await gemmCase(gpu, r, k, t, 'gemmQ4_0x64', 64)) && ok;
   }
   window.__result = { ok };
 } catch (e) { log('ERROR', e.stack || e); window.__result = { ok: false }; }

@@ -629,6 +629,75 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
 }`;
 
 /**
+ * Y[t, row] = Σ_k W[row, k]·X[t, k] for Q4_0 W, tiled 64 rows × 64 tokens per workgroup with a 4×4 register block
+ * per thread: each k step reads one vec4 of weights and one of inputs from workgroup memory for 16 multiply-adds
+ * (gemmQ4_0 does 8 for 6 reads). Grid: [ceil(rows / 64), ceil(T / 64)]. Same uniforms as gemmQ4_0.
+ */
+export const gemmQ4_0x64 = /* wgsl */ `
+struct P { rows: u32, K: u32, T: u32, dOff: u32, yStride: u32, yOff: u32, xStride: u32, accumulate: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<u32>;
+@group(0) @binding(2) var<storage, read> X: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+var<workgroup> Ws: array<vec4<f32>, 512>; // [32 k][16 × 4 rows]
+var<workgroup> Xs: array<vec4<f32>, 512>; // [32 k][16 × 4 tokens]
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let row0 = wid.x * 64u;
+  let tok0 = wid.y * 64u;
+  let nb = p.K / 32u;
+  let tr = li / 16u; let tc = li % 16u; // this thread's rows tr·4.., tokens tc·4..
+  var acc: array<vec4<f32>, 4>;          // acc[i] = row tr·4+i, tokens tc·4..tc·4+3
+  // Loader roles: W: row lr, word lq (8 values) of its block. X: token xt, values xk..xk+7.
+  let lr = li / 4u; let lq = li % 4u;
+  let lrow = row0 + lr;
+  let xt = li / 4u; let xk = (li % 4u) * 8u;
+  let xtok = tok0 + xt;
+  for (var b = 0u; b < nb; b++) {
+    var w8 = array<f32, 8>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    if (lrow < p.rows) {
+      let blk = lrow * nb + b;
+      let dw = W[p.dOff + (blk >> 1u)];
+      let d = select(unpack2x16float(dw).x, unpack2x16float(dw).y, (blk & 1u) == 1u);
+      let q = W[blk * 4u + lq];
+      for (var j = 0u; j < 4u; j++) {
+        let byte = (q >> (j * 8u)) & 0xffu;
+        w8[j] = (f32(byte & 15u) - 8.0) * d;
+        w8[j + 4u] = (f32(byte >> 4u) - 8.0) * d;
+      }
+    }
+    // Byte j of word lq holds k = lq·4 + j (low nibble) and k = lq·4 + j + 16 (high nibble).
+    for (var j = 0u; j < 4u; j++) {
+      Ws[(lq * 4u + j) * 16u + lr / 4u][lr % 4u] = w8[j];
+      Ws[(lq * 4u + j + 16u) * 16u + lr / 4u][lr % 4u] = w8[j + 4u];
+    }
+    for (var j = 0u; j < 8u; j++) {
+      let k = xk + j;
+      Xs[k * 16u + xt / 4u][xt % 4u] = select(0.0, X[xtok * p.xStride + b * 32u + k], xtok < p.T);
+    }
+    workgroupBarrier();
+    for (var k = 0u; k < 32u; k++) {
+      let w = Ws[k * 16u + tr];
+      let x = Xs[k * 16u + tc];
+      acc[0] += w.x * x;
+      acc[1] += w.y * x;
+      acc[2] += w.z * x;
+      acc[3] += w.w * x;
+    }
+    workgroupBarrier();
+  }
+  for (var i = 0u; i < 4u; i++) {
+    let row = row0 + tr * 4u + i;
+    if (row < p.rows) {
+      for (var j = 0u; j < 4u; j++) {
+        let tok = tok0 + tc * 4u + j;
+        if (tok < p.T) { Y[tok * p.yStride + p.yOff + row] = acc[i][j]; }
+      }
+    }
+  }
+}`;
+
+/**
  * Top 16 of each 256-value slice of the logits: C[(slice·16 + i)·2] = value bits, C[… + 1] = token id.
  * Reading back these candidates (8 KB per 1,000 slices) replaces reading back every logit; the true top-k is in
  * them unless more than 16 of it share one slice of 256 neighbouring token ids.
