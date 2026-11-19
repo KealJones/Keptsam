@@ -107,7 +107,8 @@ const MODELS = {
   },
   'qwen3-0.6b': {
     name: 'Qwen3 0.6B',
-    gguf: HF + 'unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf', ggufBytes: 382156480,
+    // llama.cpp's own Q4_0: every weight Q4_0, embedding and head included (unsloth's mixes in Q4_1).
+    gguf: HF + 'ggml-org/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf', ggufBytes: 428970080,
     // WebLLM's own prebuilt builds.
     mlc: { f16: { id: 'Qwen3-0.6B-q4f16_1-MLC', prebuilt: true }, f32: { id: 'Qwen3-0.6B-q4f32_1-MLC', prebuilt: true } },
     onnx: 'onnx-community/Qwen3-0.6B-ONNX',
