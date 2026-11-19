@@ -1,5 +1,8 @@
 # WebLLM next to Tilde's new kernels, LFM3 1.7B, iPhone 16, Safari 27.2, Nov 19, 2026 (afternoon)
 
+**The phone was on Low Power Mode for this run**, which throttles the GPU, so its WebLLM numbers aren't comparable
+with the Tilde runs. The run with Low Power Mode off is [2026-11-19-iphone16-lfm3-vs-webllm.md](2026-11-19-iphone16-lfm3-vs-webllm.md).
+
 Run right after the Tilde rerun in [2026-11-19-iphone16-lfm3-kernels.md](2026-11-19-iphone16-lfm3-kernels.md), from
 [bench/compare.html](../../bench/compare.html). WebLLM runs our own LFM3 MLC build
 (`kealjones/LFM3-1.7B-QAD-q4f16_1-MLC`) on unmodified WebLLM 0.2.87; "Squiggle's pacing" adds Squiggle's `paceGpu`
@@ -19,7 +22,8 @@ GPU apple (shader-f16); context 4096; 64 tokens written, greedy; one warm-up req
 Stock WebLLM alone again, a few minutes later: lost the GPU at 256 tokens the same way ("Object has already been
 disposed"; GPU lost while reading); 1,024 and 3,072 skipped.
 
-Against Tilde from the same half hour (default settings, read / write tok/s, first token):
+Against Tilde from the same half hour (default settings, read / write tok/s, first token); not a fair comparison,
+see the note at the top:
 
 | Prompt | Tilde | WebLLM + pacing | Tilde ahead by |
 |---:|---|---|---|

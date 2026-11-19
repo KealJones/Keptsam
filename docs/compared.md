@@ -46,10 +46,11 @@ Tilde reads LFM3 prompts at 138–139 / 137 / 119 tok/s by default (256 / 1,024 
 1,024). First token on a 3,072-token prompt: 75 s → 21–26 s. Writing is about unchanged (12 tok/s at 256). One
 default run was killed while loading, below its own steady memory; the rerun finished every size.
 
-**WebLLM in the same half hour ([run](runs/2026-11-19-iphone16-lfm3-webllm.md)):** stock WebLLM lost the GPU while
-reading the 256-token prompt, twice. Paced WebLLM finished all three sizes this time at 60 / 57 / 54 tok/s reading and
-8.2 / 8.3 / 7.7 writing, so Tilde (138 / 137 / 119 and 12.3 / 11.9 / 10.4) now reads 2.2–2.4× and writes 1.35–1.5×
-faster, and reaches the first token in less than half the time (25.7 s against 56.7 s at 3,072).
+**Tilde and stock WebLLM taking turns (Nov 19, normal power, [run](runs/2026-11-19-iphone16-lfm3-vs-webllm.md)):** at
+256 tokens Tilde (256-token chunks) read 1.45× faster than WebLLM (149 against 102.5 tok/s) and reached the first token
+sooner (1.7 s against 2.5), while WebLLM wrote 5% faster (12.7 against 12.1). WebLLM was then killed while loading the
+1,024 run; Tilde finished 1,024 (149 / 11.4) and 3,072 (115 / 8.9). An earlier WebLLM run that afternoon
+([run](runs/2026-11-19-iphone16-lfm3-webllm.md)) was on Low Power Mode and doesn't count.
 
 ## Qwen3 0.6B: one phone, two passes (Nov 19, 2026)
 

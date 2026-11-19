@@ -60,25 +60,24 @@ flowchart LR
 ## Next to the other runtimes
 
 LFM3 1.7B on one iPhone 16, Safari 27.2, from [bench/compare.html](bench/compare.html): each runtime in a fresh page,
-same text, 64 tokens written. Speeds in tokens per second (read / write); one run per cell. The Nov 19 rows ran in
-the same half hour ([Tilde](docs/runs/2026-11-19-iphone16-lfm3-kernels.md#rerun-five-minutes-later),
-[WebLLM](docs/runs/2026-11-19-iphone16-lfm3-webllm.md)); the rest are from Nov 18. Details and caveats are in
-[docs/compared.md](docs/compared.md); why each one breaks, with diagrams, is in [docs/versus.md](docs/versus.md).
+same text, 64 tokens written. Speeds in tokens per second (read / write); one run per cell. The first two rows ran
+taking turns on Nov 19 ([run](docs/runs/2026-11-19-iphone16-lfm3-vs-webllm.md)); the rest are from Nov 18, before
+Tilde's kernel rewrite. Details and caveats are in [docs/compared.md](docs/compared.md); why each one breaks, with
+diagrams, is in [docs/versus.md](docs/versus.md).
 
 | Runtime | 256-token prompt | 1,024 | 3,072 |
 |---|---|---|---|
-| **Tilde** (Nov 19) | ✅ 138.2 / 12.3 | ✅ 137 / 11.9 | ✅ 119.4 / 10.4 |
-| **Tilde**, 256-token chunks (Nov 19) | ✅ 156.6 / 12.3 | ✅ 152.2 / 11.6 | ✅ 124.8 / 10.0 |
-| **WebLLM** (our MLC build), stock (Nov 19) | 💀 lost the GPU while reading, twice | – | – |
-| **WebLLM** + Squiggle's pacing (Nov 19) | ✅ 60.1 / 8.2 | ✅ 57.1 / 8.3 | ✅ 54.2 / 7.7 |
+| **Tilde**, 256-token chunks (Nov 19) | ✅ 149.1 / 12.1 | ✅ 149.2 / 11.4 | ✅ 115 / 8.9 |
+| **WebLLM** (our MLC build), stock (Nov 19) | ✅ 102.5 / 12.7 | 💀 killed while loading | – |
+| **WebLLM** + Squiggle's pacing (Nov 18) | ✅ 75.5 / 12.1 | ✅ 66.7 / 8.4 | 💀 killed while loading |
 | **wllama 3.13** WebGPU | 💀 killed while loading | – | – |
 | **wllama 3.13** CPU | ✅ 1.8 / 1.4 | ✅ 1.6 / 1.6 (10.8 min to first token) | ⏱ timed out at 25 min |
 | **transformers.js 4.4** | 💀 killed while loading | – | – |
 | **LiteRT-LM 0.19** | 💀 killed while loading | – | – |
 
-Tilde reads LFM3 prompts 2.2–2.4× faster than paced WebLLM and writes 1.35–1.5× faster, in about the same memory
-(1,065 MB against 1,040). On Nov 18, before Tilde's kernel rewrite, it was the other way round: Tilde read at 35–50
-tok/s and paced WebLLM at 67–76.
+Since its Nov 19 kernel rewrite, Tilde reads LFM3 prompts 1.45× faster than stock WebLLM (at 256 tokens, where WebLLM
+survives) and writes about as fast (12.1 against 12.7). On Nov 18, Tilde read at 35–50 tok/s.
+([All of Tilde's Nov 19 runs](docs/runs/2026-11-19-iphone16-lfm3-kernels.md): 138–157 at 256 tokens.)
 
 With Qwen3 0.6B (Nov 19, [details](docs/compared.md#qwen3-06b-one-phone-two-passes-nov-19-2026)): Tilde again
 finished every prompt size, in the least memory (865 MB against WebLLM's 1,125 and LiteRT-LM's 1,496). After that
