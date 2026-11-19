@@ -62,6 +62,10 @@ Tilde's f16 cache. One run per cell; read / write in tokens per second.
 - **LiteRT-LM is the fastest runtime here by far,** where it survives: it read prompts 4.5–7× faster than Tilde and
   wrote 1.4–1.5× faster, and reached the first token of a 1,024-token prompt in 1.3 s against Tilde's 8.8 s. Its
   speeds are its own benchmark counts, and its prompt includes the chat template's few extra tokens.
+- **LiteRT-LM's numbers repeat.** Two more LiteRT-only runs read at 600 and 608 tok/s (256 tokens) and 811 (1,024),
+  within 2% of the pass above. The 3,072-token prompt lost the GPU in all three runs that got that far, the same way
+  each time, and one run was killed while loading at 430 MB of GPU buffers: loading a model that settles at 1.5 GB is
+  close enough to the tab's ~1.9 GB that iOS sometimes kills it first ([runs](runs/2026-11-19-iphone16-qwen3-pass2.md#litert-lm-alone-twice-more-same-morning)).
 - **Only Tilde finished every prompt size.** All three GPU runtimes that got past 256 tokens lost the GPU while
   reading a longer prompt: stock WebLLM at 1,024, paced WebLLM and LiteRT-LM at 3,072 (LiteRT-LM: "timeout was reached
   while reading back data"). That's WebKit's command-buffer limit, which Tilde sizes its work around.
