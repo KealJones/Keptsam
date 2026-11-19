@@ -14,27 +14,28 @@ export class Qwen3 {
    * Streams a Qwen3 GGUF into GPU memory. Layer weights must be Q4_0; the embedding and head Q4_0 or Q6_K.
    * @param {import('../gpu.js').Gpu} gpu
    * @param {import('../gguf.js').ByteSource} src
-   * @param {{ ctx?: number, chunk?: number, gguf?: object, onProgress?: (p: {loaded: number, total: number, tensor: string}) => void }} opts
+   * @param {{ ctx?: number, chunk?: number, maxChunk?: number, submitBudgetMs?: number, gguf?: object, onProgress?: (p: {loaded: number, total: number, tensor: string}) => void }} opts
    */
-  static async load(gpu, src, { ctx = 4096, chunk = 64, gguf, onProgress } = {}) {
+  static async load(gpu, src, { ctx = 4096, chunk = 64, maxChunk = chunk, submitBudgetMs = 1000, gguf, onProgress } = {}) {
     const g = gguf || await readGGUF(src);
     if (g.kv['general.architecture'] !== 'qwen3') throw new Error(`not a Qwen3 model: ${g.kv['general.architecture']}`);
     for (const t of g.tensors) {
       const want = t.name === 'token_embd.weight' || t.name === 'output.weight' ? ['Q4_0', 'Q6_K'] : t.dims.length > 1 ? ['Q4_0'] : ['F32'];
       if (!want.includes(t.typeName)) throw new Error(`Tilde runs Qwen3 with ${want.join(' or ')} for ${t.name}; this file has ${t.typeName} (a pure Q4_0 GGUF works, e.g. ggml-org/Qwen3-0.6B-GGUF)`);
     }
-    const m = new Qwen3(gpu, g, { ctx, chunk });
+    const m = new Qwen3(gpu, g, { ctx, chunk, maxChunk, submitBudgetMs });
     m.w = await streamTensors(gpu, src, g.tensors, { tag: 'weights', onProgress });
     m.#allocState();
     return m;
   }
 
-  constructor(gpu, g, { ctx, chunk }) {
+  constructor(gpu, g, { ctx, chunk, maxChunk = chunk, submitBudgetMs = 1000 }) {
     this.gpu = gpu;
     this.gguf = g;
     this.ctx = ctx;
+    /** Tokens per forward pass now; adapts between 8 and maxChunk (activations are sized for maxChunk). */
     this.chunk = chunk;
-    this.maxChunk = chunk;
+    this.maxChunk = Math.max(chunk, maxChunk);
     this.nLayer = archKey(g, 'block_count');
     this.nEmbd = archKey(g, 'embedding_length');
     this.nFF = archKey(g, 'feed_forward_length');
@@ -61,7 +62,7 @@ export class Qwen3 {
     this.w = {};
     this.pos = 0;
     /** Submits are sized to stay under this many ms (see LFM3: WebKit kills the GPU at ~3 s). */
-    this.submitBudgetMs = 1000;
+    this.submitBudgetMs = submitBudgetMs;
     /** Single-token matmul: 'wide' (8 rows per workgroup) or 'row' (one workgroup per row). */
     this.decodeKernel = 'wide';
     /** GPU ms per layer per token, by batch size rounded up to a power of 2. */
@@ -69,7 +70,7 @@ export class Qwen3 {
   }
 
   #allocState() {
-    const gpu = this.gpu, T = this.chunk, E = this.nEmbd, F = this.nFF;
+    const gpu = this.gpu, T = this.maxChunk, E = this.nEmbd, F = this.nFF;
     const f = (n, tag = 'activations') => gpu.buffer(n * 4, tag);
     this.a = {
       x: f(T * E), h: f(T * E), y: f(T * E),
@@ -153,7 +154,7 @@ export class Qwen3 {
   /** Runs tokens (≤ chunk) through the model at the current position, in submits sized by measurement. */
   async forward(tokens) {
     const T = tokens.length, E = this.nEmbd, a = this.a, gpu = this.gpu, pos0 = this.pos;
-    if (T > this.chunk) throw new Error(`forward takes at most ${this.chunk} tokens`);
+    if (T > this.maxChunk) throw new Error(`forward takes at most ${this.maxChunk} tokens`);
     if (pos0 + T > this.ctx) throw new Error('context is full');
     const bucket = 2 ** Math.ceil(Math.log2(T));
     let est = this.est.get(bucket);

@@ -13,23 +13,24 @@ export class LFM3 {
    * Streams an LFM3 GGUF into GPU memory.
    * @param {import('../gpu.js').Gpu} gpu
    * @param {import('../gguf.js').ByteSource} src
-   * @param {{ ctx?: number, chunk?: number, gguf?: object, onProgress?: (p: {loaded: number, total: number, tensor: string}) => void }} opts
+   * @param {{ ctx?: number, chunk?: number, maxChunk?: number, submitBudgetMs?: number, gguf?: object, onProgress?: (p: {loaded: number, total: number, tensor: string}) => void }} opts
    */
-  static async load(gpu, src, { ctx = 4096, chunk = 64, gguf, onProgress } = {}) {
+  static async load(gpu, src, { ctx = 4096, chunk = 64, maxChunk = chunk, submitBudgetMs = 1000, gguf, onProgress } = {}) {
     const g = gguf || await readGGUF(src);
     if (g.kv['general.architecture'] !== 'lfm3') throw new Error(`not an LFM3 model: ${g.kv['general.architecture']}`);
-    const m = new LFM3(gpu, g, { ctx, chunk });
+    const m = new LFM3(gpu, g, { ctx, chunk, maxChunk, submitBudgetMs });
     await m.#stream(src, onProgress);
     m.#allocState();
     return m;
   }
 
-  constructor(gpu, g, { ctx, chunk }) {
+  constructor(gpu, g, { ctx, chunk, maxChunk = chunk, submitBudgetMs = 1000 }) {
     this.gpu = gpu;
     this.gguf = g;
     this.ctx = ctx;
+    /** Tokens per forward pass now; adapts between 8 and maxChunk (activations are sized for maxChunk). */
     this.chunk = chunk;
-    this.maxChunk = chunk;
+    this.maxChunk = Math.max(chunk, maxChunk);
     this.nLayer = archKey(g, 'block_count');
     this.nEmbd = archKey(g, 'embedding_length');
     this.nFF = archKey(g, 'feed_forward_length');
@@ -53,7 +54,7 @@ export class LFM3 {
      * layer per token. The estimate starts pessimistic and follows the slowest recent submit, so a cold device
      * starts with small submits instead of finding out the hard way (WebKit kills the GPU at ~3 s).
      */
-    this.submitBudgetMs = 1000;
+    this.submitBudgetMs = submitBudgetMs;
     /** Single-token matmul: 'wide' (8 rows per workgroup) or 'row' (one workgroup per row). */
     this.decodeKernel = 'wide';
     /** Estimates by batch size (rounded up to a power of 2): cost per token is not flat in the batch size. */
@@ -65,7 +66,7 @@ export class LFM3 {
   }
 
   #allocState() {
-    const gpu = this.gpu, T = this.chunk, E = this.nEmbd, F = this.nFF;
+    const gpu = this.gpu, T = this.maxChunk, E = this.nEmbd, F = this.nFF;
     const f = (n, tag = 'activations') => gpu.buffer(n * 4, tag);
     this.swaSlots = this.window + T;
     this.a = {
@@ -205,7 +206,7 @@ export class LFM3 {
 
   async #forward(T, tokens, embeds) {
     const E = this.nEmbd, a = this.a, gpu = this.gpu, pos0 = this.pos;
-    if (T > this.chunk) throw new Error(`forward takes at most ${this.chunk} tokens`);
+    if (T > this.maxChunk) throw new Error(`forward takes at most ${this.maxChunk} tokens`);
     if (pos0 + T > this.ctx) throw new Error('context is full');
     const bucket = 2 ** Math.ceil(Math.log2(T));
     // Unknown batch size: borrow the worst estimate from a smaller one, else start pessimistic.

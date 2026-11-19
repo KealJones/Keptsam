@@ -115,8 +115,11 @@ const MODELS = {
     litert: () => 'hf://litert-community/Qwen3-0.6B@main/Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm',
   },
 };
+// "Tilde, big chunks": more prompt tokens per GPU pass and a longer submit budget (?bigChunk=…&bigBudget=… in ms).
+const BIG = { chunk: Number(qs.get('bigChunk')) || 256, submitBudgetMs: Number(qs.get('bigBudget')) || 2000 };
 const ENGINES = [
   { id: 'tilde', name: 'Tilde', what: 'the 4-bit GGUF, read directly' },
+  { id: 'tilde-big', name: 'Tilde, big chunks', what: `the same, reading prompts ${BIG.chunk} tokens per pass with a ${BIG.submitBudgetMs / 1000} s submit budget (default 64 and 1 s)` },
   { id: 'webllm', name: `WebLLM ${V.webllm}`, what: 'a 4-bit MLC build, stock WebLLM' },
   { id: 'webllm-paced', name: 'WebLLM + Squiggle\'s pacing', what: 'the same, prompt read in 128-token pieces with a wait after each (what Squiggle ships)' },
   { id: 'wllama-gpu', name: `wllama ${V.wllama} WebGPU`, what: 'llama.cpp, same GGUF, all layers on the GPU' },
@@ -423,37 +426,8 @@ function stopwatch() {
 }
 
 const RUNNERS = {
-  tilde: {
-    async prepare(c) {
-      const kx = await import(TILDE + 'index.js');
-      const info = await kx.cachedFileInfo(GGUF_(), 'tilde-v1', { size: M().ggufBytes }).catch(() => null);
-      if (info?.complete) return c.note({ already: true });
-      c.stage('downloading');
-      const t = now();
-      await kx.cacheFile(GGUF_(), { size: M().ggufBytes, onProgress: (d, total) => c.progress(`downloading ${MB(d)} of ${MB(total)} MB`) });
-      c.note({ downloadS: S(now() - t) });
-    },
-    async run(c) {
-      const kx = await import(TILDE + 'index.js');
-      c.stage('loading');
-      let t = now();
-      const llm = await kx.Tilde.load(GGUF_(), { ctx: c.ctx, onProgress: ({ loaded, total }) => c.progress(`loading ${MB(loaded)} of ${MB(total)} MB`) });
-      const loadS = S(now() - t);
-      c.stage('warm-up');
-      await llm.generate(WARM, { maxTokens: 2, temperature: 0, repeatPenalty: 1 });
-      const ids = llm.tokenizer.encode(c.text);
-      c.stage('reading');
-      const w = stopwatch();
-      let readMs = 0;
-      await llm.generate(ids, {
-        maxTokens: c.gen, temperature: 0, repeatPenalty: 1,
-        onRead: () => { readMs = now() - w.t0; c.stage('writing'); },
-        onToken: (p) => w.token(p),
-      });
-      const st = llm.stats();
-      return { loadS, promptTokens: ids.length, readTokS: per(ids.length, readMs), ...w.out(), engineMB: st.peakMB, longestSubmitMs: st.longestSubmitMs };
-    },
-  },
+  tilde: tildeRunner(),
+  'tilde-big': tildeRunner({ chunk: BIG.chunk, maxChunk: BIG.chunk, submitBudgetMs: BIG.submitBudgetMs }),
 
   webllm: webllmRunner(false),
   'webllm-paced': webllmRunner(true),
@@ -531,6 +505,41 @@ const RUNNERS = {
     },
   },
 };
+function tildeRunner(opts = {}) {
+  return {
+    async prepare(c) {
+      const kx = await import(TILDE + 'index.js');
+      const info = await kx.cachedFileInfo(GGUF_(), 'tilde-v1', { size: M().ggufBytes }).catch(() => null);
+      if (info?.complete) return c.note({ already: true });
+      c.stage('downloading');
+      const t = now();
+      await kx.cacheFile(GGUF_(), { size: M().ggufBytes, onProgress: (d, total) => c.progress(`downloading ${MB(d)} of ${MB(total)} MB`) });
+      c.note({ downloadS: S(now() - t) });
+    },
+    async run(c) {
+      const kx = await import(TILDE + 'index.js');
+      c.stage('loading');
+      let t = now();
+      const llm = await kx.Tilde.load(GGUF_(), { ctx: c.ctx, ...opts, onProgress: ({ loaded, total }) => c.progress(`loading ${MB(loaded)} of ${MB(total)} MB`) });
+      const loadS = S(now() - t);
+      c.stage('warm-up');
+      await llm.generate(WARM, { maxTokens: 2, temperature: 0, repeatPenalty: 1 });
+      const ids = llm.tokenizer.encode(c.text);
+      c.stage('reading');
+      const w = stopwatch();
+      let readMs = 0;
+      await llm.generate(ids, {
+        maxTokens: c.gen, temperature: 0, repeatPenalty: 1,
+        onRead: () => { readMs = now() - w.t0; c.stage('writing'); },
+        onToken: (p) => w.token(p),
+      });
+      const st = llm.stats();
+      if (opts.chunk) c.note({ build: `${opts.chunk}-token chunks, ${opts.submitBudgetMs / 1000} s budget` });
+      return { loadS, promptTokens: ids.length, chunkAtEnd: llm.model.chunk, readTokS: per(ids.length, readMs), ...w.out(), engineMB: st.peakMB, longestSubmitMs: st.longestSubmitMs };
+    },
+  };
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // A ReadableStream as an async iterable, for browsers whose streams can't be used with for await yet.
 async function* chunksOf(stream) {
@@ -697,7 +706,7 @@ function why(q) {
   if (r.waitedForGpuS) bits.push(`waited ${r.waitedForGpuS} s for a GPU first`);
   if (r.hidden) bits.push('page was hidden for part of it');
   if (r.build) bits.push(r.build + (r.threads ? `, ${r.threads} thread${r.threads > 1 ? 's' : ''}` : ''));
-  if (r.engineMB) bits.push(`Tilde counted ${r.engineMB} MB`);
+  if (r.engineMB) bits.push(`Tilde counted ${r.engineMB} MB` + (r.longestSubmitMs ? `, longest submit ${r.longestSubmitMs} ms` : '') + (r.chunkAtEnd ? `, chunk ${r.chunkAtEnd} at the end` : ''));
   if (r.wrote != null && r.wrote < (q.gen || 0)) bits.push(`wrote ${r.wrote}`);
   for (const n of r.notes || []) bits.push(n);
   return bits.join('; ');
