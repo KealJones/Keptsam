@@ -40,6 +40,32 @@ What this run says, and doesn't:
 
 Full table with every note: [runs/2026-11-18-iphone16-lfm3.md](runs/2026-11-18-iphone16-lfm3.md).
 
+## Qwen3 0.6B: one phone, one day (Nov 19, 2026)
+
+The same bench with a model a third the size, to see engine speed with less memory pressure. Tilde and wllama read
+ggml-org's pure Q4_0 GGUF; WebLLM ran its own prebuilt q4f16_1 build. One run per cell; speeds in tokens per
+second ([full export](runs/2026-11-19-iphone16-qwen3.md)).
+
+| Runtime | 256-token prompt | 1,024 | 3,072 |
+|---|---|---|---|
+| **Tilde** | ✅ read 128, write 25.3 | ✅ read 109, write 20.2 | ✅ read 62, write 11.1 |
+| **WebLLM 0.2.87**, stock | ✅ read 215, write 31.3 | 💀 lost the GPU while reading | skipped |
+| **WebLLM + Squiggle's pacing** | ✅ read 181, write 19.8 | ✅ read 205, write 19.3 | 💀 lost the GPU while reading |
+| **wllama 3.13 WebGPU** | ❌ aborted while running | skipped | skipped |
+| **wllama 3.13 CPU** | ✅ read 6.1, write 2.3 | ✅ read 5.0, write 2.2 (3.5 min to first token) | 💀 killed (page hidden part of the time) |
+| **transformers.js**, **LiteRT-LM** | not tested: downloads failed while the phone was locked | | |
+
+- **Only Tilde finished every prompt size again,** and this time both WebLLM failures happened while reading the
+  prompt, which is the watchdog, not memory: even Squiggle's pacing wasn't enough at 3,072 tokens.
+- **WebLLM reads prompts faster** (1.7–1.9× at 256 and 1,024). **Tilde writes faster than paced WebLLM**, the
+  version that survives iOS 27 (25.3 vs 19.8 and 20.2 vs 19.3); stock WebLLM writes fastest at 256 (31.3), until it
+  dies.
+- **Tilde slows down with context:** writing goes 25.3 → 20.2 → 11.1 tok/s from 256 to 3,072 tokens. Its attention
+  kernel walks the cache one position at a time per head; splitting that work across workgroups is the next speed job.
+- **Tilde used more memory than WebLLM here (1,321 vs 1,125 MB)** because its KV cache was f32: every one of Qwen3's 28
+  layers keeps one. It's f16 now (llama.cpp's default too), which takes ~450 MB off, to about 870 MB; still to be
+  measured on the phone.
+
 ## Earlier results, by runtime
 
 | Runtime | Result | Speed | Memory | How it ended |
@@ -101,6 +127,6 @@ by design.
 - Rerun the two WebLLM deaths (both while loading) and repeat every cell three times, with a fixed GPU workload
   timed before each test, so heat and leftover memory stop deciding results.
 - Tilde at 6K and 8K. If Tilde loads at 8K, that's a direct win over WebLLM, which died loading there on Nov 15.
-- The same table with a model small enough that nothing should die (Qwen3 0.6B has a build for every other
-  runtime), to measure engine speed alone. Tilde needs a Qwen3 architecture file first.
+- Qwen3 0.6B again with Tilde's f16 KV cache, plus transformers.js and LiteRT-LM, which didn't get a fair run.
+- Faster attention over long contexts: split each head's walk over the cache across workgroups.
 - Close the reading-speed gap: at 1,024 tokens WebLLM reads ~1.9× faster.

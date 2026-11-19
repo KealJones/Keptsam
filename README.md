@@ -74,6 +74,10 @@ cell. Details and caveats are in [docs/compared.md](docs/compared.md); why each 
 | **transformers.js 4.4** | 💀 killed while loading | – | – |
 | **LiteRT-LM 0.19** | 💀 killed while loading | – | – |
 
+With Qwen3 0.6B (Nov 19): Tilde again finished every prompt size (writing 25.3 / 20.2 / 11.1 tok/s at 256 / 1,024 /
+3,072 tokens). Stock WebLLM lost the GPU at 1,024 and paced WebLLM at 3,072, both while reading the prompt; where
+paced WebLLM ran, it read faster and wrote slower than Tilde.
+
 Tilde isn't the fastest: where WebLLM survives, it reads prompts 1.5–1.9× faster. Tilde is the only one that
 finished every prompt size, and it stays up on iOS 27 without patches, needs no compile jobs, reads Liquid's
 official GGUFs as they are and swaps senses in and out.
