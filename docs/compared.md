@@ -46,11 +46,14 @@ The same bench with a model a third the size. Tilde and wllama read ggml-org's p
 prebuilt q4f16_1 build, transformers.js onnx-community's q4f16 and LiteRT-LM litert-community's 4-bit build. The
 first pass ([export](runs/2026-11-19-iphone16-qwen3.md)) had Tilde with an f32 KV cache and lost transformers.js and
 LiteRT-LM to a locked phone; the second pass ([export](runs/2026-11-19-iphone16-qwen3-pass2.md)) reran those with
-Tilde's f16 cache. One run per cell; read / write in tokens per second.
+Tilde's f16 cache. That afternoon Tilde got new matmul and attention kernels and ran again
+([export](runs/2026-11-19-iphone16-qwen3-kernels.md)). One run per cell; read / write in tokens per second.
 
 | Runtime | Memory | 256-token prompt | 1,024 | 3,072 |
 |---|---:|---|---|---|
-| **Tilde**, f16 KV (pass 2) | **873 MB** | ✅ 134 / 26.9 | ✅ 116 / 21.7 | ✅ 83 / 14.6 |
+| **Tilde**, new kernels (afternoon) | **865 MB** | ✅ 322 / 26.7 | ✅ 268 / 21.0 | ✅ 178 / 14.5 |
+| **Tilde**, new kernels, 256-token chunks | 879 MB | ✅ 407 / 27.1 | ✅ 337 / 21.5 | ✅ 214 / 14.4 |
+| Tilde, f16 KV (pass 2) | 873 MB | ✅ 134 / 26.9 | ✅ 116 / 21.7 | ✅ 83 / 14.6 |
 | Tilde, f32 KV (pass 1) | 1,321 MB | ✅ 128 / 25.3 | ✅ 109 / 20.2 | ✅ 62 / 11.1 |
 | **LiteRT-LM 0.19** (pass 2) | 1,496 MB | ✅ **610 / 37.8** | ✅ **803 / 33.4** | 💀 lost the GPU while reading |
 | **WebLLM 0.2.87**, stock | 1,125 MB | ✅ 215 / 31.3 | 💀 lost the GPU while reading | skipped |
@@ -59,9 +62,13 @@ Tilde's f16 cache. One run per cell; read / write in tokens per second.
 | **wllama 3.13 CPU** | – | ✅ 6.1 / 2.3 | ✅ 5.0 / 2.2 (3.5 min to first token) | 💀 killed (page hidden part of the time) |
 | **transformers.js 4.4** | – | 💀 killed while downloading or loading (pass 2) | skipped | skipped |
 
-- **LiteRT-LM is the fastest runtime here by far,** where it survives: it read prompts 4.5–7× faster than Tilde and
-  wrote 1.4–1.5× faster, and reached the first token of a 1,024-token prompt in 1.3 s against Tilde's 8.8 s. Its
+- **LiteRT-LM is the fastest runtime here,** where it survives. Against Tilde's morning build it read prompts 4.5–7×
+  faster; against the afternoon's new kernels the gap is 1.5–3× (2.4× at 1,024 tokens with 256-token chunks), and its
+  first token of a 1,024-token prompt comes in 1.3 s against Tilde's 3.0. It also writes 1.3–1.6× faster. Its
   speeds are its own benchmark counts, and its prompt includes the chat template's few extra tokens.
+- **Tilde now reads prompts faster than WebLLM:** 322 tok/s at 256 tokens against stock WebLLM's 215, and 268 at
+  1,024 against paced WebLLM's 205 (different sessions of the same day; one run each). The new kernels made Tilde's
+  reading 2.2–2.7× faster ([run](runs/2026-11-19-iphone16-qwen3-kernels.md)).
 - **LiteRT-LM's numbers repeat.** Two more LiteRT-only runs read at 600 and 608 tok/s (256 tokens) and 811 (1,024),
   within 2% of the pass above. The 3,072-token prompt lost the GPU in all three runs that got that far, the same way
   each time, and one run was killed while loading at 430 MB of GPU buffers: loading a model that settles at 1.5 GB is
@@ -69,11 +76,12 @@ Tilde's f16 cache. One run per cell; read / write in tokens per second.
 - **Only Tilde finished every prompt size.** All three GPU runtimes that got past 256 tokens lost the GPU while
   reading a longer prompt: stock WebLLM at 1,024, paced WebLLM and LiteRT-LM at 3,072 (LiteRT-LM: "timeout was reached
   while reading back data"). That's WebKit's command-buffer limit, which Tilde sizes its work around.
-- **Tilde now uses the least memory:** 873 MB with the f16 cache, against WebLLM's 1,125 and LiteRT-LM's 1,496
+- **Tilde now uses the least memory:** 865–873 MB with the f16 cache, against WebLLM's 1,125 and LiteRT-LM's 1,496
   (all counted by watching `createBuffer`).
 - **Tilde slows down with context:** writing goes 26.9 → 21.7 → 14.6 tok/s from 256 to 3,072 tokens. Its attention
   kernel walks the cache one position at a time per head; splitting that work across workgroups is the next speed job.
-  Its prompt reading is the bigger gap: LiteRT-LM reads 4.5–7× faster on the same phone.
+  Prompt reading also slows with context (322 → 178 tok/s); the fused attention kernel only reaches ~120 GFLOP/s
+  against the matmul's ~500.
 
 ## Earlier results, by runtime
 
@@ -136,9 +144,10 @@ by design.
 - Rerun the two WebLLM deaths (both while loading) and repeat every cell three times, with a fixed GPU workload
   timed before each test, so heat and leftover memory stop deciding results.
 - Tilde at 6K and 8K. If Tilde loads at 8K, that's a direct win over WebLLM, which died loading there on Nov 15.
-- Prompt reading: LiteRT-LM reads Qwen3 prompts 4.5–7× faster than Tilde on the same phone. Bigger batches aren't
-  it: 256-token chunks with a 2 s budget read only 6–10% faster than the default 64 and 1 s, and a 4 s budget lost
-  the GPU ([run](runs/2026-11-19-iphone16-qwen3-chunks.md)). The gap is in the matmul kernels (tiling, f16 math
-  where the GPU has it).
-- Faster attention over long contexts: split each head's walk over the cache across workgroups.
-- Close the reading-speed gap: at 1,024 tokens WebLLM reads ~1.9× faster.
+- Prompt reading: the matmul rewrite (64×64 tiles) and fused attention made Tilde 2.2–2.7× faster
+  ([run](runs/2026-11-19-iphone16-qwen3-kernels.md)); LiteRT-LM still reads 1.5–3× faster. Before the rewrite,
+  bigger chunks gave only 6–10% and a 4 s budget lost the GPU ([run](runs/2026-11-19-iphone16-qwen3-chunks.md));
+  after it, 256-token chunks give 19–27%.
+- Faster attention over long contexts: the fused kernel runs 64 workgroups per layer at 64 tokens; splitting each
+  head's keys across workgroups should lift it past ~120 GFLOP/s. Decode attention needs the same.
+- Run LFM3 1.7B and the other runtimes again against the new kernels.
