@@ -33,7 +33,7 @@
 </style>
 
 <h1>~ Tilde vs the other browser runtimes</h1>
-<p class="mute">Liquid AI's LFM3 1.7B, 4-bit, on every runtime that has a build of it. Each test runs alone in a fresh page
+<p class="mute">One 4-bit model (LFM3 1.7B or Qwen3 0.6B) on every runtime that has a build of it. Each test runs alone in a fresh page
 load and writes every step to this browser's storage as it goes, so a tab iOS kills still leaves its result: the next
 load records how far it got and moves on to the next test. Results never leave this phone unless you export or share them.</p>
 
@@ -41,13 +41,15 @@ load records how far it got and moves on to the next test. Results never leave t
 
 <fieldset id="setup">
   <legend>New run</legend>
+  <label>Model <select id="model"></select></label>
   <div id="engines"></div>
   <label>Prompt sizes <input type="text" id="prompts" value="256,1024,3072"></label>
   <label>Tokens to write <input type="text" id="gen" value="64" style="width:60px"></label>
   <label>Context <input type="text" id="ctx" value="4096" style="width:60px"></label>
   <label>Rest between tests (s) <input type="text" id="pause" value="5" style="width:50px"></label>
   <p><button id="start">Start a run</button> <button id="wipe">Delete downloaded models</button></p>
-  <p class="mute">The first pass downloads each runtime's own copy of the model (about 5.6 GB in all; keep the phone on Wi-Fi,
+  <p class="mute">The first pass downloads each runtime's own copy of the model (LFM3: about 5.6 GB in all, Qwen3 0.6B:
+  about 2 GB; keep the phone on Wi-Fi,
   awake and on this tab). Tests take turns by prompt size, so the phone warms up evenly for everyone. A runtime that dies
   or times out on a prompt isn't asked to try a longer one.</p>
 </fieldset>
@@ -80,33 +82,46 @@ takes chat messages, so its prompt also gets the chat template's few tokens.</p>
 // URL options (all optional): ?run=1 starts a run with these settings if none is going
 //   &engines=tilde,webllm,…  &prompts=256,1024,3072  &gen=64  &ctx=4096  &pause=5
 //   &sha=<commit>  pins Tilde through jsDelivr instead of ../src/
-//   &onnx=<repo>   another transformers.js repo (default onnx-community/LFM3-1.7B-ONNX)
+//   &model=lfm3|qwen3-0.6b   which model every runtime runs (default lfm3)
+//   &onnx=<repo>   another transformers.js repo than the model's default
 //   &compat=0|1    force wllama's normal or Safari (compat) build; default: whichever this browser can compile
 //   &dry=1         adds a fake engine for checking the page itself
 const qs = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
 const HF = 'https://huggingface.co/';
-const GGUF = HF + 'LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf';
-const GGUF_BYTES = 1049615680;
 const TILDE = qs.get('sha') ? `https://cdn.jsdelivr.net/gh/KealJones/tilde@${qs.get('sha')}/src/` : '../src/';
 const V = { webllm: '0.2.87', wllama: '3.13.0', transformers: '4.4.0-next.0', litert: '0.19.0' };
-const MLC = {
-  f16: { id: 'LFM3-1.7B-QAD-q4f16_1-MLC', model: HF + 'kealjones/LFM3-1.7B-QAD-q4f16_1-MLC/resolve/main/',
-    model_lib: HF + 'kealjones/LFM3-1.7B-QAD-q4f16_1-MLC/resolve/main/LFM3-1.7B-q4f16_1-b1-webgpu.wasm' },
-  f32: { id: 'LFM3-1.7B-QAD-q4f32_1-MLC', model: HF + 'kealjones/LFM3-1.7B-QAD-q4f32_1-MLC/resolve/main/',
-    model_lib: HF + 'kealjones/LFM3-1.7B-QAD-q4f32_1-MLC/resolve/main/LFM3-1.7B-q4f32_1-b1-webgpu.wasm' },
+// Each model, as each runtime gets it. GGUF (Tilde and wllama), MLC (WebLLM), ONNX (transformers.js), LiteRT-LM.
+const MODELS = {
+  lfm3: {
+    name: 'LFM3 1.7B',
+    gguf: HF + 'LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-QAD-Q4_0.gguf', ggufBytes: 1049615680,
+    mlc: {
+      f16: { id: 'LFM3-1.7B-QAD-q4f16_1-MLC', model: HF + 'kealjones/LFM3-1.7B-QAD-q4f16_1-MLC/resolve/main/',
+        model_lib: HF + 'kealjones/LFM3-1.7B-QAD-q4f16_1-MLC/resolve/main/LFM3-1.7B-q4f16_1-b1-webgpu.wasm' },
+      f32: { id: 'LFM3-1.7B-QAD-q4f32_1-MLC', model: HF + 'kealjones/LFM3-1.7B-QAD-q4f32_1-MLC/resolve/main/',
+        model_lib: HF + 'kealjones/LFM3-1.7B-QAD-q4f32_1-MLC/resolve/main/LFM3-1.7B-q4f32_1-b1-webgpu.wasm' },
+    },
+    onnx: 'onnx-community/LFM3-1.7B-ONNX',
+    litert: (ctx) => `hf://litert-community/LFM3-1.7B-LiteRT@main/LFM3-1.7B_mixed_int4_ekv${ctx <= 2048 ? 2048 : 4096}.litertlm`,
+  },
+  'qwen3-0.6b': {
+    name: 'Qwen3 0.6B',
+    gguf: HF + 'unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf', ggufBytes: 382156480,
+    // WebLLM's own prebuilt builds.
+    mlc: { f16: { id: 'Qwen3-0.6B-q4f16_1-MLC', prebuilt: true }, f32: { id: 'Qwen3-0.6B-q4f32_1-MLC', prebuilt: true } },
+    onnx: 'onnx-community/Qwen3-0.6B-ONNX',
+    litert: () => 'hf://litert-community/Qwen3-0.6B@main/Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm',
+  },
 };
-const ONNX = qs.get('onnx') || 'onnx-community/LFM3-1.7B-ONNX';
-const litertFile = (ctx) => `hf://litert-community/LFM3-1.7B-LiteRT@main/LFM3-1.7B_mixed_int4_ekv${ctx <= 2048 ? 2048 : 4096}.litertlm`;
-
 const ENGINES = [
-  { id: 'tilde', name: 'Tilde', what: 'Liquid\'s QAD Q4_0 GGUF (1.05 GB), read directly' },
-  { id: 'webllm', name: `WebLLM ${V.webllm}`, what: 'our MLC build of the same QAD weights (0.99 GB), stock WebLLM' },
+  { id: 'tilde', name: 'Tilde', what: 'the 4-bit GGUF, read directly' },
+  { id: 'webllm', name: `WebLLM ${V.webllm}`, what: 'a 4-bit MLC build, stock WebLLM' },
   { id: 'webllm-paced', name: 'WebLLM + Squiggle\'s pacing', what: 'the same, prompt read in 128-token pieces with a wait after each (what Squiggle ships)' },
   { id: 'wllama-gpu', name: `wllama ${V.wllama} WebGPU`, what: 'llama.cpp, same GGUF, all layers on the GPU' },
   { id: 'wllama-cpu', name: `wllama ${V.wllama} CPU`, what: 'llama.cpp in WebAssembly, same GGUF' },
-  { id: 'transformers', name: `transformers.js ${V.transformers}`, what: `ONNX on WebGPU (${ONNX}, q4f16)` },
-  { id: 'litert', name: `LiteRT-LM ${V.litert}`, what: 'Google\'s runtime on WebGPU, litert-community mixed int4 (1.44 GB)' },
+  { id: 'transformers', name: `transformers.js ${V.transformers}`, what: 'ONNX on WebGPU, q4f16' },
+  { id: 'litert', name: `LiteRT-LM ${V.litert}`, what: 'Google\'s runtime on WebGPU, litert-community 4-bit' },
 ];
 if (qs.get('dry')) ENGINES.push({ id: 'dry', name: 'Dry run', what: 'fake engine: ?die=<prompt> kills its tab, ?fail=<prompt> throws' });
 const ENGINE = Object.fromEntries(ENGINES.map((e) => [e.id, e]));
@@ -123,6 +138,10 @@ const save = () => {
   }
 };
 const current = () => db.suites.at(-1);
+// The model of the run in progress, else the one asked for in the URL or the form.
+const M = () => { const s = current(); return MODELS[(s && !s.ended && s.settings.model) || qs.get('model') || $('model')?.value || 'lfm3'] || MODELS.lfm3; };
+const GGUF_ = () => M().gguf;
+const ONNX_ = () => qs.get('onnx') || M().onnx;
 let viewing = null; // suite id picked in the results list
 
 // ── what this browser is ────────────────────────────────────────────────────────────────────────────────────
@@ -210,13 +229,14 @@ const TEXT = 'The history of the ocean is the history of life on Earth. Tides, c
 function settingsFromForm() {
   const list = (s) => s.split(',').map((x) => Number(x.trim())).filter((x) => x > 0);
   const engines = [...document.querySelectorAll('#engines input:checked')].map((i) => i.value);
-  return { engines, prompts: list($('prompts').value).sort((a, b) => a - b), gen: Number($('gen').value) || 64,
+  return { model: $('model').value, engines, prompts: list($('prompts').value).sort((a, b) => a - b), gen: Number($('gen').value) || 64,
     ctx: Number($('ctx').value) || 4096, pause: Number($('pause').value) || 0 };
 }
 function fillForm() {
   $('engines').innerHTML = ENGINES.map((e) => `<label title="${e.what}"><input type="checkbox" value="${e.id}" ${e.id === 'dry' ? '' : 'checked'}> ${e.name}</label>`).join('');
   if (qs.get('engines')) for (const i of document.querySelectorAll('#engines input')) i.checked = qs.get('engines').split(',').includes(i.value);
-  for (const k of ['prompts', 'gen', 'ctx', 'pause']) if (qs.get(k)) $(k).value = qs.get(k);
+  $('model').innerHTML = Object.entries(MODELS).map(([id, m]) => `<option value="${id}">${m.name}</option>`).join('');
+  for (const k of ['model', 'prompts', 'gen', 'ctx', 'pause']) if (qs.get(k)) $(k).value = qs.get(k);
 }
 
 async function startSuite(settings) {
@@ -224,11 +244,12 @@ async function startSuite(settings) {
   if (settings.prompts.at(-1) + settings.gen > settings.ctx) return status(`the longest prompt plus ${settings.gen} tokens doesn't fit in a ${settings.ctx}-token context`);
   status('reading the tokenizer to build the prompts…');
   const facts = await gatherFacts();
-  // Every runtime gets the same text: exactly N tokens of it by LFM3's tokenizer (identical to llama.cpp's for this
-  // model, tests/tokenizer.test.js), turned back into text. Only the GGUF's header is read (a few MB).
+  // Every runtime gets the same text: exactly N tokens of it by the model's own tokenizer (read from its GGUF; only
+  // the header, a few MB), turned back into text. Each runtime reports how many tokens it actually read.
   const kx = await import(TILDE + 'index.js');
   const { readGGUF } = await import(TILDE + 'gguf.js');
-  const hdr = await readGGUF(await kx.cachedSource(kx.httpSource(GGUF), { key: GGUF }));
+  const gguf = MODELS[settings.model].gguf;
+  const hdr = await readGGUF(await kx.cachedSource(kx.httpSource(gguf), { key: gguf }));
   const tok = kx.Tokenizer.fromGGUF(hdr.kv);
   let text = TEXT;
   while (tok.encode(text).length < settings.prompts.at(-1)) text += TEXT;
@@ -404,18 +425,18 @@ const RUNNERS = {
   tilde: {
     async prepare(c) {
       const kx = await import(TILDE + 'index.js');
-      const info = await kx.cachedFileInfo(GGUF, 'tilde-v1', { size: GGUF_BYTES }).catch(() => null);
+      const info = await kx.cachedFileInfo(GGUF_(), 'tilde-v1', { size: M().ggufBytes }).catch(() => null);
       if (info?.complete) return c.note({ already: true });
       c.stage('downloading');
       const t = now();
-      await kx.cacheFile(GGUF, { size: GGUF_BYTES, onProgress: (d, total) => c.progress(`downloading ${MB(d)} of ${MB(total)} MB`) });
+      await kx.cacheFile(GGUF_(), { size: M().ggufBytes, onProgress: (d, total) => c.progress(`downloading ${MB(d)} of ${MB(total)} MB`) });
       c.note({ downloadS: S(now() - t) });
     },
     async run(c) {
       const kx = await import(TILDE + 'index.js');
       c.stage('loading');
       let t = now();
-      const llm = await kx.Tilde.load(GGUF, { ctx: c.ctx, onProgress: ({ loaded, total }) => c.progress(`loading ${MB(loaded)} of ${MB(total)} MB`) });
+      const llm = await kx.Tilde.load(GGUF_(), { ctx: c.ctx, onProgress: ({ loaded, total }) => c.progress(`loading ${MB(loaded)} of ${MB(total)} MB`) });
       const loadS = S(now() - t);
       c.stage('warm-up');
       await llm.generate(WARM, { maxTokens: 2, temperature: 0, repeatPenalty: 1 });
@@ -519,8 +540,9 @@ async function* chunksOf(stream) {
 }
 
 function webllmRunner(paced) {
-  const pick = (c) => (c.facts.shaderF16 ? MLC.f16 : MLC.f32);
-  const config = (webllm, rec, ctx) => ({ ...webllm.prebuiltAppConfig, model_list: [...webllm.prebuiltAppConfig.model_list,
+  const pick = (c) => (c.facts.shaderF16 ? M().mlc.f16 : M().mlc.f32);
+  // Our own builds are added to WebLLM's list; its prebuilt ones (Qwen3) are used as they ship.
+  const config = (webllm, rec, ctx) => (rec.prebuilt ? webllm.prebuiltAppConfig : { ...webllm.prebuiltAppConfig, model_list: [...webllm.prebuiltAppConfig.model_list,
     { model_id: rec.id, model: rec.model, model_lib: rec.model_lib, overrides: { context_window_size: ctx } }] });
   const open = async (c, stageName) => {
     if (!navigator.gpu) throw new Error('no WebGPU in this browser');
@@ -591,12 +613,12 @@ function wllamaRunner(gpu) {
       const lib = await import(BASE + 'index.js');
       const cache = new lib.CacheManager();
       // A download cut off midway stays in wllama's cache at the wrong size; only a whole file counts.
-      const have = await cache.getSize(await cache.getNameFromURL(GGUF)).catch(() => -1);
-      if (have === GGUF_BYTES) return c.note({ already: true });
-      if (have > 0) { await cache.delete(GGUF).catch(() => {}); c.note({ notes: [`dropped a partial download (${MB(have)} MB)`] }); }
+      const have = await cache.getSize(await cache.getNameFromURL(GGUF_())).catch(() => -1);
+      if (have === M().ggufBytes) return c.note({ already: true });
+      if (have > 0) { await cache.delete(GGUF_()).catch(() => {}); c.note({ notes: [`dropped a partial download (${MB(have)} MB)`] }); }
       c.stage('downloading');
       const t = now();
-      await cache.download(GGUF, { progressCallback: ({ loaded, total }) => c.progress(`downloading ${MB(loaded)} of ${MB(total)} MB`) });
+      await cache.download(GGUF_(), { progressCallback: ({ loaded, total }) => c.progress(`downloading ${MB(loaded)} of ${MB(total)} MB`) });
       c.note({ downloadS: S(now() - t) });
     },
     async run(c) {
@@ -610,7 +632,7 @@ function wllamaRunner(gpu) {
       c.note({ build: compat ? 'Safari compat build' : 'normal build', threads: threads ?? null });
       c.stage('loading');
       let t = now();
-      await w.loadModelFromUrl(GGUF, { n_ctx: c.ctx, n_gpu_layers: gpu ? 999 : 0, ...(threads ? { n_threads: threads } : {}) });
+      await w.loadModelFromUrl(GGUF_(), { n_ctx: c.ctx, n_gpu_layers: gpu ? 999 : 0, ...(threads ? { n_threads: threads } : {}) });
       const loadS = S(now() - t);
       c.stage('warm-up');
       await w.createCompletion({ prompt: WARM, max_tokens: 2, temperature: 0 });
@@ -633,12 +655,12 @@ async function transformersLoad(c, preparing) {
   if (!navigator.gpu) throw new Error('no WebGPU in this browser');
   const tf = await import(`https://cdn.jsdelivr.net/npm/@huggingface/transformers@${V.transformers}/dist/transformers.min.js`);
   const dtype = c.facts.shaderF16 ? 'q4f16' : 'q4';
-  c.note({ build: `${ONNX} ${dtype}` });
+  c.note({ build: `${ONNX_()} ${dtype}` });
   c.stage(preparing ? 'downloading or loading' : 'loading');
   const progress_callback = (p) => { if (p.status === 'progress_total' || p.status === 'progress') c.progress(`${p.file || 'files'} ${Math.round(p.progress || 0)}%`); };
   const t = now();
-  const tokenizer = await tf.AutoTokenizer.from_pretrained(ONNX, { progress_callback });
-  const model = await tf.AutoModelForCausalLM.from_pretrained(ONNX, { dtype, device: 'webgpu', progress_callback });
+  const tokenizer = await tf.AutoTokenizer.from_pretrained(ONNX_(), { progress_callback });
+  const model = await tf.AutoModelForCausalLM.from_pretrained(ONNX_(), { dtype, device: 'webgpu', progress_callback });
   const loadS = S(now() - t);
   if (preparing) { c.note({ downloadAndLoadS: loadS }); unloading = true; await model.dispose?.(); }
   return { tf, tokenizer, model, loadS };
@@ -647,7 +669,7 @@ async function transformersLoad(c, preparing) {
 async function litertLoad(c, stageName) {
   if (!navigator.gpu) throw new Error('no WebGPU in this browser');
   const lr = await import(`https://cdn.jsdelivr.net/npm/@litert-lm/core@${V.litert}/+esm`);
-  const file = litertFile(c.ctx);
+  const file = M().litert(c.ctx);
   c.note({ build: file.split('/').pop() });
   c.stage(stageName);
   const t = now();
@@ -687,7 +709,7 @@ function render() {
   if (!s) { $('facts').textContent = 'No runs yet.'; $('table').innerHTML = ''; $('summary').innerHTML = ''; return; }
   const f = s.facts || {};
   // Safari freezes the iOS version in its user agent (27.x still says 18.7), so only its own version means anything.
-  $('facts').textContent = `${f.device} ${f.safari ? 'Safari ' + f.safari : f.os} · GPU: ${[...new Set((f.adapter || 'none').split(' '))].join(' ')}${f.shaderF16 ? ' (shader-f16)' : ''} · `
+  $('facts').textContent = `${(MODELS[s.settings.model] || MODELS.lfm3).name} · ${f.device} ${f.safari ? 'Safari ' + f.safari : f.os} · GPU: ${[...new Set((f.adapter || 'none').split(' '))].join(' ')}${f.shaderF16 ? ' (shader-f16)' : ''} · `
     + `${f.cores} cores · JSPI ${f.jspi ? 'yes' : 'no'}, Memory64 ${f.memory64 ? 'yes' : 'no'} · context ${s.settings.ctx}, writing ${s.settings.gen} tokens · started ${new Date(s.started).toLocaleString()}`;
   const runs = s.queue.filter((q) => q.kind === 'run');
   // Bars: writing speed per prompt size, a cross for a runtime that never got there.
@@ -720,7 +742,7 @@ function render() {
 function markdown(s) {
   if (!s) return '';
   const f = s.facts || {};
-  const lines = [`### LFM3 1.7B, ${f.device} ${f.safari ? 'Safari ' + f.safari : f.os || ''}, ${s.started.slice(0, 10)}`, '',
+  const lines = [`### ${(MODELS[s.settings.model] || MODELS.lfm3).name}, ${f.device} ${f.safari ? 'Safari ' + f.safari : f.os || ''}, ${s.started.slice(0, 10)}`, '',
     `GPU ${[...new Set((f.adapter || 'none').split(' '))].join(' ')}${f.shaderF16 ? ' (shader-f16)' : ''}; context ${s.settings.ctx}; ${s.settings.gen} tokens written, greedy; one warm-up request each. Tilde: ${s.tilde}.`, '',
     '| Runtime | Prompt | Outcome | Load s | Read tok/s | Write tok/s | First token s | GPU MB | Worst frame ms | Notes |', '|---|---:|---|---:|---:|---:|---:|---:|---:|---|'];
   for (const q of s.queue.filter((x) => x.kind === 'run')) {
