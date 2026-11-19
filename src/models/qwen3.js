@@ -6,6 +6,10 @@ import { readGGUF, archKey } from '../gguf.js';
 import { streamTensors } from '../loader.js';
 import * as K from '../kernels.js';
 
+// Prompt chunks of this many tokens or more use the fused attention kernel (K.attnFlashFor); smaller ones and decode use
+// scores → softmax → out, which spreads one token's work over the keys. The score buffer only needs room for those.
+const FLASH_FROM = 33;
+
 const MM = {}; // matmul source by tokens-per-pass
 
 export class Qwen3 {
@@ -52,6 +56,7 @@ export class Qwen3 {
       kvWrite: K.kvWriteFor(this.nKV),
       scores: K.attnScoresFor(this.nHead, this.nKV),
       out: K.attnOutFor(this.nHead, this.nKV, false),
+      flash: K.attnFlashFor(this.nHead, this.nKV, false),
     };
     this.tokenizer = {
       tokens: g.kv['tokenizer.ggml.tokens'], merges: g.kv['tokenizer.ggml.merges'],
@@ -76,7 +81,7 @@ export class Qwen3 {
       x: f(T * E), h: f(T * E), y: f(T * E),
       q: f(T * this.qDim), qn: f(T * this.qDim), att: f(T * this.qDim),
       k: f(T * this.kvDim), kn: f(T * this.kvDim), v: f(T * this.kvDim),
-      g: f(T * F), u: f(T * F), S: f(T * this.nHead * this.ctx), headIn: f(E), logits: f(this.vocab),
+      g: f(T * F), u: f(T * F), S: f(Math.min(T, FLASH_FROM - 1) * this.nHead * this.ctx), headIn: f(E), logits: f(this.vocab),
       tok: gpu.buffer(T * 4, 'activations'), ones: f(64),
     };
     gpu.device.queue.writeBuffer(this.a.ones, 0, new Float32Array(64).fill(1));
@@ -133,7 +138,9 @@ export class Qwen3 {
     const rows = w.rows;
     const u = this.#u(rows, w.K, T, w.dOff, rows, 0, w.K, 0);
     if (T >= 4) {
-      this.gpu.dispatch(enc, K.gemmQ4_0, [u, w.buf, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 32)]);
+      // 64×64 tiles from 33 tokens up (3× gemmQ4_0 on an iPhone 16, bench/kernel-bench.html); 32×64 below.
+      if (T > 32) this.gpu.dispatch(enc, K.gemmQ4_0x64, [u, w.buf, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 64)]);
+      else this.gpu.dispatch(enc, K.gemmQ4_0, [u, w.buf, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 32)]);
       return;
     }
     if (T === 1 && this.decodeKernel === 'wide') {
@@ -212,9 +219,13 @@ export class Qwen3 {
     gpu.dispatch(enc, K.rope, [this.#uf([KV, pos0, this.ropeBase, 0], [2]), a.kn, a.ones], T * KV);
     gpu.dispatch(enc, this.K.kvWrite, [this.#u(pos0, c.slots, 0, 0), a.kn, a.v, c.k, c.v], T);
     const Lk = pos0 + T;
-    gpu.dispatch(enc, this.K.scores, [this.#u(pos0, T, c.slots, Lk, 0xffffffff, this.ctx, 0, 0), a.qn, c.k, a.S], [Math.ceil(Lk / 64), T * H]);
-    gpu.dispatch(enc, K.softmax, [this.#u(Lk, this.ctx, 0, 0), a.S], T * H);
-    gpu.dispatch(enc, this.K.out, [this.#u(Lk, this.ctx, 0, 0), a.S, c.v, a.att], T * H);
+    if (T >= FLASH_FROM) {
+      gpu.dispatch(enc, this.K.flash, [this.#u(pos0, T, c.slots, Lk, 0xffffffff, 0, 0, 0), a.qn, c.k, c.v, a.att], [Math.ceil(T / (16 / (H / KV))), KV]);
+    } else {
+      gpu.dispatch(enc, this.K.scores, [this.#u(pos0, T, c.slots, Lk, 0xffffffff, this.ctx, 0, 0), a.qn, c.k, a.S], [Math.ceil(Lk / 64), T * H]);
+      gpu.dispatch(enc, K.softmax, [this.#u(Lk, this.ctx, 0, 0), a.S], T * H);
+      gpu.dispatch(enc, this.K.out, [this.#u(Lk, this.ctx, 0, 0), a.S, c.v, a.att], T * H);
+    }
     this.#matmul(enc, p + 'attn_output.weight', a.att, a.y, T);
     this.#add(enc, a.y, a.x, T * E);
     this.#norm(enc, a.x, this.w[p + 'ffn_norm.weight'].buf, a.h, T, E);

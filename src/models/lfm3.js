@@ -5,6 +5,10 @@ import { readGGUF, archKey } from '../gguf.js';
 import { streamTensors } from '../loader.js';
 import * as K from '../kernels.js';
 
+// Prompt chunks of this many tokens or more use the fused attention kernel (K.attnFlashFor); smaller ones and decode use
+// scores → softmax → out, which spreads one token's work over the keys. The score buffer only needs room for those.
+const FLASH_FROM = 33;
+
 const MM = {}; // matmul source by tokens-per-pass
 
 export class LFM3 {
@@ -72,7 +76,7 @@ export class LFM3 {
     this.a = {
       x: f(T * E), h: f(T * E), y: f(T * E), att: f(T * E), bcx: f(T * 3 * E),
       q: f(T * E), qn: f(T * E), k: f(T * 512), kn: f(T * 512), v: f(T * 512), gate: f(T * 16),
-      g: f(T * F), u: f(T * F), S: f(T * 16 * this.ctx), headIn: f(E), logits: f(this.vocab),
+      g: f(T * F), u: f(T * F), S: f(Math.min(T, FLASH_FROM - 1) * 16 * this.ctx), headIn: f(E), logits: f(this.vocab),
       tok: gpu.buffer(T * 4, 'activations'), ones: f(64),
     };
     gpu.device.queue.writeBuffer(this.a.ones, 0, new Float32Array(64).fill(1));
@@ -176,7 +180,9 @@ export class LFM3 {
     const rows = w.rows;
     const u = this.#u(rows, w.K, T, w.dOff, yStride ?? rows, yOff, xStride ?? w.K, accumulate);
     if (T >= 4) {
-      this.gpu.dispatch(enc, K.gemmQ4_0, [u, w.buf, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 32)]);
+      // 64×64 tiles from 33 tokens up (3× gemmQ4_0 on an iPhone 16, bench/kernel-bench.html); 32×64 below.
+      if (T > 32) this.gpu.dispatch(enc, K.gemmQ4_0x64, [u, w.buf, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 64)]);
+      else this.gpu.dispatch(enc, K.gemmQ4_0, [u, w.buf, X, Y], [Math.ceil(rows / 64), Math.ceil(T / 32)]);
       return;
     }
     if (T === 1 && this.decodeKernel === 'wide') {
@@ -278,9 +284,13 @@ export class LFM3 {
       gpu.dispatch(enc, K.kvWrite, [this.#u(pos0, c.slots, 0, 0), a.kn, a.v, c.k, c.v], T);
       const Lk = Math.min(pos0 + T, c.slots);
       const win = L.swa ? this.window : 0xffffffff;
-      gpu.dispatch(enc, K.attnScores, [this.#u(pos0, T, c.slots, Lk, win, this.ctx, 0, 0), a.qn, c.k, a.S], [Math.ceil(Lk / 64), T * 16]);
-      gpu.dispatch(enc, K.softmax, [this.#u(Lk, this.ctx, 0, 0), a.S], T * 16);
-      gpu.dispatch(enc, K.attnOut, [this.#u(Lk, this.ctx, 0, 0), a.S, c.v, a.gate, a.att], T * 16);
+      if (T >= FLASH_FROM) {
+        gpu.dispatch(enc, K.attnFlash, [this.#u(pos0, T, c.slots, Lk, win, 0, 0, 0), a.qn, c.k, c.v, a.gate, a.att], [Math.ceil(T / 4), 4]);
+      } else {
+        gpu.dispatch(enc, K.attnScores, [this.#u(pos0, T, c.slots, Lk, win, this.ctx, 0, 0), a.qn, c.k, a.S], [Math.ceil(Lk / 64), T * 16]);
+        gpu.dispatch(enc, K.softmax, [this.#u(Lk, this.ctx, 0, 0), a.S], T * 16);
+        gpu.dispatch(enc, K.attnOut, [this.#u(Lk, this.ctx, 0, 0), a.S, c.v, a.gate, a.att], T * 16);
+      }
       this.#matmul(enc, p + 'attn_output.weight', a.att, a.y, T);
     }
     this.#norm(enc, a.y, this.w[p + 'post_attention_norm.weight'].buf, a.x, T, E, { mode: 1 });
