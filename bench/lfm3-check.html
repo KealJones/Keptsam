@@ -1,11 +1,12 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Tilde: LFM3 vs llama.cpp</title>
+<title>Tilde vs llama.cpp (LFM3, Qwen3)</title>
 <pre id="log"></pre>
 <script type="module">
 import { openGpu } from '../src/gpu.js';
-import { httpSource } from '../src/gguf.js';
-import { LFM3 } from '../src/models/lfm3.js';
+import { httpSource, readGGUF } from '../src/gguf.js';
+// Any architecture Tilde runs; the model class comes from the GGUF's general.architecture.
+const CLASSES = { lfm3: () => import('../src/models/lfm3.js').then((m) => m.LFM3), qwen3: () => import('../src/models/qwen3.js').then((m) => m.Qwen3) };
 
 const qs = new URLSearchParams(location.search);
 const model = qs.get('model') || '/models/LFM3-1.7B-QAD-Q4_0.gguf';
@@ -29,7 +30,11 @@ try {
   const gpu = await openGpu();
   log('adapter', gpu.adapter.info?.vendor, gpu.adapter.info?.architecture);
   let t0 = performance.now();
-  const m = await LFM3.load(gpu, httpSource(model), { ctx: 1024, chunk: 16 });
+  const src = httpSource(model);
+  const gguf = await readGGUF(src);
+  const arch = gguf.kv['general.architecture'];
+  log('architecture', arch);
+  const m = await (await CLASSES[arch]()).load(gpu, src, { ctx: 1024, chunk: 16, gguf });
   log('loaded in', ((performance.now() - t0) / 1000).toFixed(1), 's', JSON.stringify(gpu.report()));
   t0 = performance.now();
   await m.forward(ref.toks);

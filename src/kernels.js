@@ -110,6 +110,28 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
 }`;
 
+/** X[t, :] = row tok[t] of a Q4_0 embedding table (K wide), dequantized. Scales start at word dOff. */
+export const embedQ4_0 = /* wgsl */ `
+struct P { K: u32, dOff: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> W: array<u32>;
+@group(0) @binding(2) var<storage, read> tok: array<u32>;
+@group(0) @binding(3) var<storage, read_write> X: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = wid.x;
+  let nb = p.K / 32u;
+  for (var k = lid.x; k < p.K; k += 256u) {
+    let blk = tok[t] * nb + k / 32u;
+    let dw = W[p.dOff + (blk >> 1u)];
+    let d = select(unpack2x16float(dw).x, unpack2x16float(dw).y, (blk & 1u) == 1u);
+    let j = k % 32u; let jj = j % 16u;
+    let byte = (W[blk * 4u + jj / 4u] >> ((jj % 4u) * 8u)) & 0xffu;
+    let q = select(byte & 15u, byte >> 4u, j >= 16u);
+    X[t * p.K + k] = (f32(q) - 8.0) * d;
+  }
+}`;
+
 /** RMSNorm over rows of length N. mode 0: Y = norm(X)·w. mode 1: Y += norm(X)·w (residual add). */
 export const rmsnorm = /* wgsl */ `
 struct P { N: u32, mode: u32, eps: f32, wMod: u32, xOff: u32, yOff: u32, pad0: u32, pad1: u32 }
@@ -152,8 +174,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   V[base + i + 64u] = a * s + b * c;
 }`;
 
-/** Writes K and V rows [T, 4, 128] into ring caches of `slots` slots at position pos0 + t. */
-export const kvWrite = /* wgsl */ `
+/** Writes K and V rows [T, KVH, 128] into ring caches of `slots` slots at position pos0 + t. */
+export const kvWriteFor = (KVH) => /* wgsl */ `
 struct P { pos0: u32, slots: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> K: array<f32>;
@@ -164,11 +186,12 @@ struct P { pos0: u32, slots: u32, pad0: u32, pad1: u32 }
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let t = wid.x;
   let slot = (p.pos0 + t) % p.slots;
-  for (var i = lid.x; i < 512u; i += 128u) {
-    KC[slot * 512u + i] = K[t * 512u + i];
-    VC[slot * 512u + i] = Vv[t * 512u + i];
+  for (var i = lid.x; i < ${KVH * 128}u; i += 128u) {
+    KC[slot * ${KVH * 128}u + i] = K[t * ${KVH * 128}u + i];
+    VC[slot * ${KVH * 128}u + i] = Vv[t * ${KVH * 128}u + i];
   }
 }`;
+export const kvWrite = kvWriteFor(4);
 
 // Position held by cache slot j once positions up to maxPos are written (ring of 'slots').
 const SLOTPOS = /* wgsl */ `
@@ -177,8 +200,8 @@ fn slotPos(j: u32, maxPos: u32, slots: u32) -> i32 {
   return i32(maxPos) - i32(back);
 }`;
 
-/** S[t·16+h, j] = q·k / √128 with causal and window masks (−inf when hidden). */
-export const attnScores = /* wgsl */ `
+/** S[t·H+h, j] = q·k / √128 with causal and window masks (−inf when hidden); H query heads share KVH KV heads. */
+export const attnScoresFor = (H, KVH) => /* wgsl */ `
 struct P { pos0: u32, T: u32, slots: u32, L: u32, window: u32, sStride: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> Q: array<f32>;
@@ -190,18 +213,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let j = gid.x;
   let th = gid.y;
   if (j >= p.L) { return; }
-  let t = th / 16u; let h = th % 16u;
+  let t = th / ${H}u; let h = th % ${H}u;
   let qp = i32(p.pos0 + t);
   let kp = slotPos(j, p.pos0 + p.T - 1u, p.slots);
   var s = -3.0e38;
   if (kp >= 0 && kp <= qp && u32(qp - kp) < p.window) {
-    let qb = th * 128u; let kb = j * 512u + (h / 4u) * 128u;
+    let qb = th * 128u; let kb = j * ${KVH * 128}u + (h / ${H / KVH}u) * 128u;
     var acc = 0.0;
     for (var d = 0u; d < 128u; d++) { acc += Q[qb + d] * KC[kb + d]; }
     s = acc * 0.08838834764831845;
   }
   S[th * p.sStride + j] = s;
 }`;
+export const attnScores = attnScoresFor(16, 4);
 
 /** Softmax in place over rows of length L. */
 export const softmax = /* wgsl */ `
@@ -225,25 +249,26 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   for (var j = lid.x; j < p.L; j += 256u) { S[b + j] *= inv; }
 }`;
 
-/** O[t, h, :] = sigmoid(G[t, h]) · Σ_j P[t·16+h, j] · V[j, h/4, :]. */
-export const attnOut = /* wgsl */ `
+/** O[t, h, :] = sigmoid(G[t, h]) · Σ_j P[t·H+h, j] · V[j, h/(H/KVH), :]; without `gated`, no G and no sigmoid. */
+export const attnOutFor = (H, KVH, gated = true) => /* wgsl */ `
 struct P { L: u32, sStride: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<storage, read> S: array<f32>;
 @group(0) @binding(2) var<storage, read> VC: array<f32>;
-@group(0) @binding(3) var<storage, read> G: array<f32>;
-@group(0) @binding(4) var<storage, read_write> O: array<f32>;
+${gated ? `@group(0) @binding(3) var<storage, read> G: array<f32>;
+@group(0) @binding(4) var<storage, read_write> O: array<f32>;` : '@group(0) @binding(3) var<storage, read_write> O: array<f32>;'}
 @compute @workgroup_size(128)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let th = wid.x; let h = th % 16u; let d = lid.x;
+  let th = wid.x; let h = th % ${H}u; let d = lid.x;
   var acc = 0.0;
   for (var j = 0u; j < p.L; j++) {
     let w = S[th * p.sStride + j];
-    if (w != 0.0) { acc += w * VC[j * 512u + (h / 4u) * 128u + d]; }
+    if (w != 0.0) { acc += w * VC[j * ${KVH * 128}u + (h / ${H / KVH}u) * 128u + d]; }
   }
-  let g = 1.0 / (1.0 + exp(-G[th]));
-  O[th * 128u + d] = acc * g;
+${gated ? `  let g = 1.0 / (1.0 + exp(-G[th]));
+  O[th * 128u + d] = acc * g;` : '  O[th * 128u + d] = acc;'}
 }`;
+export const attnOut = attnOutFor(16, 4);
 
 /** LFM short conv over T tokens: Y = C ⊙ conv7(B ⊙ X), keeping the last 6 inputs per channel as state. */
 export const shortconv = /* wgsl */ `

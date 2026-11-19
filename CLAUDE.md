@@ -32,5 +32,10 @@ int32/f32). Mount the model and the dump into the bench server:
 
     TILDE_MOUNTS="/models=/path/to/ggufs /ref=/path/to/dumps" npm run gpu-test -- "lfm3-check.html?gen=4"
 
-SwiftShader is slow (~80 s per token for LFM3 1.7B on 2 cores), so keep `gen` small. Baseline (Nov 16, 2026):
-"The capital of France is" → top 5 identical, max |logit diff| 0.50, 12/12 greedy tokens identical.
+The page picks the model class from the GGUF's architecture (LFM3 or Qwen3). Make a dump with
+`tools/llama-dump.cpp` (build line at its top): `llama-dump model.gguf "The capital of France is" out.bin 12`.
+
+SwiftShader is slow (~80 s per token for LFM3 1.7B on 2 cores, ~17 s for Qwen3 0.6B), so keep `gen` small.
+Baselines on "The capital of France is":
+- LFM3 1.7B QAD Q4_0 (Nov 16, 2026): top 5 identical, max |logit diff| 0.50, 12/12 greedy tokens identical.
+- Qwen3 0.6B Q4_0, ggml-org (Nov 18, 2026): top 5 identical, max |logit diff| 0.43, 8/8 greedy tokens identical.

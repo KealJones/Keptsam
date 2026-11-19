@@ -8,16 +8,25 @@ import { httpSource } from './gguf.js';
 import { Tokenizer } from './tokenizer.js';
 import { cachedSource, clearCache, cacheFile, cachedFileInfo, removeCachedFile } from './cache.js';
 import { readGGUF } from './gguf.js';
-import { LFM3 } from './models/lfm3.js';
-import { LFM3Vision } from './models/lfm3vl.js';
-import { LFM3Audio } from './models/lfm3a.js';
 import { patchify } from './image.js';
 import { readVideo, groups as videoGroups, frameTimes } from './video.js';
 import { logMel, decodeAudio, parseWav } from './audio.js';
-import { LFM3SpeechGen } from './models/lfm3gen.js';
 import { Istft, sampleCode, wav, SPEECH_RATE } from './speech.js';
 
-export { openGpu, httpSource, Tokenizer, LFM3, LFM3Vision, LFM3Audio, LFM3SpeechGen, cachedSource, clearCache, cacheFile, cachedFileInfo, removeCachedFile, patchify, logMel, decodeAudio, parseWav, wav, SPEECH_RATE, readVideo, frameTimes };
+// Model code loads on demand: only the file for the GGUF's architecture, and each sense's encoder when it is
+// first used, so adding architectures costs nothing to pages that don't run them.
+const ARCHS = {
+  lfm3: () => import('./models/lfm3.js').then((m) => m.LFM3),
+  qwen3: () => import('./models/qwen3.js').then((m) => m.Qwen3),
+};
+const vision = () => import('./models/lfm3vl.js').then((m) => m.LFM3Vision);
+const audio = () => import('./models/lfm3a.js').then((m) => m.LFM3Audio);
+const speechGen = () => import('./models/lfm3gen.js').then((m) => m.LFM3SpeechGen);
+
+/** Architectures Tilde can run (general.architecture in the GGUF). */
+export const architectures = Object.keys(ARCHS);
+
+export { openGpu, httpSource, Tokenizer, cachedSource, clearCache, cacheFile, cachedFileInfo, removeCachedFile, patchify, logMel, decodeAudio, parseWav, wav, SPEECH_RATE, readVideo, frameTimes };
 
 const roundEven = (x) => { const r = Math.round(x); return Math.abs(x % 1) === 0.5 && r % 2 ? r - 1 : r; };
 
@@ -34,7 +43,11 @@ export class Tilde {
   static async load(source, { ctx = 4096, chunk = 64, cache = true, gpu, onProgress, mmproj, imageMaxPixels = 512 * 512, keepEncoders = false } = {}) {
     gpu ||= await openGpu();
     const open = async (s) => (typeof s === 'string' && cache ? cachedSource(httpSource(s), { key: s }) : typeof s === 'string' ? httpSource(s) : s);
-    const model = await LFM3.load(gpu, await open(source), { ctx, chunk, onProgress });
+    const src = await open(source);
+    const gguf = await readGGUF(src);
+    const arch = gguf.kv['general.architecture'];
+    if (!ARCHS[arch]) throw new Error(`Tilde doesn't run "${arch}" models yet (it runs: ${architectures.join(', ')})`);
+    const model = await (await ARCHS[arch]()).load(gpu, src, { ctx, chunk, onProgress, gguf });
     const k = new Tilde(gpu, model);
     if (mmproj) {
       const src = await open(mmproj);
@@ -67,7 +80,7 @@ export class Tilde {
    * @param {{ role: string, content: string | any[] }[]} messages
    */
   formatChat(messages, { thinking = true } = {}) {
-    const parts = [this.tokenizer.tokens[this.tokenizer.bos]];
+    const parts = [this.tokenizer.bos === undefined ? '' : this.tokenizer.tokens[this.tokenizer.bos]];
     const push = (x) => { if (typeof x === 'string' && typeof parts.at(-1) === 'string') parts[parts.length - 1] += x; else parts.push(x); };
     const content = (c) => {
       if (!Array.isArray(c)) return push(String(c ?? ''));
@@ -173,7 +186,7 @@ export class Tilde {
     if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot hear audio.');
     if (!this.audio) {
       o.onStatus?.('loading audio encoder');
-      this.audio = await LFM3Audio.load(this.gpu, this.encoders.src, this.encoders.gguf);
+      this.audio = await (await audio()).load(this.gpu, this.encoders.src, this.encoders.gguf);
     }
     o.onStatus?.('listening');
     const { buf, tokens } = await this.audio.encode(logMel(pcm));
@@ -198,12 +211,12 @@ export class Tilde {
     let aud = null;
     try {
       if (pcm) {
-        if (!this.audio) { o.onStatus?.('loading audio encoder'); this.audio = await LFM3Audio.load(this.gpu, this.encoders.src, this.encoders.gguf); }
+        if (!this.audio) { o.onStatus?.('loading audio encoder'); this.audio = await (await audio()).load(this.gpu, this.encoders.src, this.encoders.gguf); }
         o.onStatus?.('listening to the soundtrack');
         aud = await this.audio.encode(logMel(pcm));
         if (!this.keepEncoders) { this.audio.free(); this.audio = null; }
       }
-      if (!this.vision) { o.onStatus?.('loading vision encoder'); this.vision = await LFM3Vision.load(this.gpu, this.encoders.src, this.encoders.gguf); }
+      if (!this.vision) { o.onStatus?.('loading vision encoder'); this.vision = await (await vision()).load(this.gpu, this.encoders.src, this.encoders.gguf); }
       const f0 = video.frames[0];
       const cfg = { ...this.vision.cfg, minPixels: 0, maxPixels: f0.width * f0.height };
       let samples = 0, row = 0, tokens = 0;
@@ -241,7 +254,7 @@ export class Tilde {
     if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot read images.');
     if (!this.vision) {
       o.onStatus?.('loading vision encoder');
-      this.vision = await LFM3Vision.load(this.gpu, this.encoders.src, this.encoders.gguf);
+      this.vision = await (await vision()).load(this.gpu, this.encoders.src, this.encoders.gguf);
     }
     o.onStatus?.('reading image');
     const pt = patchify(image, { ...this.vision.cfg, maxPixels: Math.min(this.vision.cfg.maxPixels, this.imageMaxPixels) });
@@ -264,7 +277,7 @@ export class Tilde {
     if (!this.encoders) throw new Error('This model was loaded without an mmproj, so it cannot speak.');
     if (!this.speechGen) {
       onStatus?.('loading voice');
-      this.speechGen = await LFM3SpeechGen.load(this.gpu, this.encoders.src, this.encoders.gguf);
+      this.speechGen = await (await speechGen()).load(this.gpu, this.encoders.src, this.encoders.gguf);
     }
     const g = this.speechGen, m = this.model, V = g.nVocab, n = g.nCb;
     const cfg = { ...g.sampling, temp: temperature ?? g.sampling.temp };

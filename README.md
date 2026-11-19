@@ -118,8 +118,11 @@ HTTPS).
 - [LFM3 1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF) (Liquid AI): text, thinking, chat.
 - [LFM3 Omni 2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF): text, pictures, video with its sound, audio in
   and its own voice out.
+- [Qwen3 0.6B](https://huggingface.co/ggml-org/Qwen3-0.6B-GGUF) (and other dense Qwen3 sizes with 128-wide heads):
+  text, from a Q4_0 GGUF. 631 MB on the GPU at a 4K context; same top 5 as llama.cpp and 8/8 identical greedy tokens.
 
-Model code lives in one file per architecture (`src/models/`), so adding another is a contained change.
+Model code lives in one file per architecture (`src/models/`), picked from the GGUF's `general.architecture` and
+imported only when a model of that kind loads, so adding another costs pages that don't use it nothing.
 
 ## How it's checked
 
@@ -142,4 +145,4 @@ only if it measures well. The [design doc](docs/design.md) has the full reasonin
 
 ## License
 
-MIT for the code. Model weights have their own licenses (LFM3: LFM Open License v1.0).
+MIT for the code. Model weights have their own licenses (LFM3: LFM Open License v1.0; Qwen3: Apache 2.0).

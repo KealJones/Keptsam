@@ -1,7 +1,9 @@
-// Byte-level BPE (GPT-2 style) read from GGUF metadata. Handles the "lfm2" pre-tokenizer
-// (llama.cpp maps it to the Llama 3 split with ignore_merges: a word that is already a token is kept whole).
+// Byte-level BPE (GPT-2 style) read from GGUF metadata. Pre-tokenizers, as llama.cpp maps them:
+// "lfm2" (and "llama-bpe"): the Llama 3 split with ignore_merges (a word that is already a token is kept whole);
+// "qwen2": the same split but digits one at a time, and every word goes through the merges.
 
 const SPLIT = /(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
+const SPLIT_QWEN2 = /(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
 
 // GPT-2's reversible byte → printable character map.
 const BYTE2CHAR = (() => {
@@ -20,9 +22,11 @@ const CHAR2BYTE = new Map(BYTE2CHAR.map((c, b) => [c, b]));
 const ENC = new TextEncoder();
 
 export class Tokenizer {
-  /** @param {{ tokens: string[], merges: string[], types?: number[], bos?: number, eos?: number }} meta */
-  constructor({ tokens, merges, types, bos, eos }) {
+  /** @param {{ tokens: string[], merges: string[], types?: number[], bos?: number, eos?: number, pre?: string }} meta */
+  constructor({ tokens, merges, types, bos, eos, pre }) {
     this.tokens = tokens;
+    this.split = pre === 'qwen2' ? SPLIT_QWEN2 : SPLIT;
+    this.ignoreMerges = pre !== 'qwen2';
     this.bos = bos;
     this.eos = eos;
     this.ids = new Map(tokens.map((t, i) => [t, i]));
@@ -38,7 +42,7 @@ export class Tokenizer {
   static fromGGUF(kv) {
     return new Tokenizer({
       tokens: kv['tokenizer.ggml.tokens'], merges: kv['tokenizer.ggml.merges'], types: kv['tokenizer.ggml.token_type'],
-      bos: kv['tokenizer.ggml.bos_token_id'], eos: kv['tokenizer.ggml.eos_token_id'],
+      bos: kv['tokenizer.ggml.bos_token_id'], eos: kv['tokenizer.ggml.eos_token_id'], pre: kv['tokenizer.ggml.pre'],
     });
   }
 
@@ -48,7 +52,7 @@ export class Tokenizer {
     const parts = special ? this.#splitSpecial(text) : [text];
     for (const part of parts) {
       if (typeof part === 'number') { out.push(part); continue; }
-      for (const m of part.matchAll(SPLIT)) this.#word(m[0], out);
+      for (const m of part.matchAll(this.split)) this.#word(m[0], out);
     }
     return out;
   }
@@ -98,7 +102,7 @@ export class Tokenizer {
     let ids = this.cache.get(word);
     if (!ids) {
       const chars = [...ENC.encode(word)].map((b) => BYTE2CHAR[b]);
-      const whole = this.ids.get(chars.join(''));
+      const whole = this.ignoreMerges ? this.ids.get(chars.join('')) : undefined;
       ids = whole !== undefined ? [whole] : this.#bpe(chars);
       if (this.cache.size < 50000) this.cache.set(word, ids);
     }

@@ -13,10 +13,10 @@ export class LFM3 {
    * Streams an LFM3 GGUF into GPU memory.
    * @param {import('../gpu.js').Gpu} gpu
    * @param {import('../gguf.js').ByteSource} src
-   * @param {{ ctx?: number, chunk?: number, onProgress?: (p: {loaded: number, total: number, tensor: string}) => void }} opts
+   * @param {{ ctx?: number, chunk?: number, gguf?: object, onProgress?: (p: {loaded: number, total: number, tensor: string}) => void }} opts
    */
-  static async load(gpu, src, { ctx = 4096, chunk = 64, onProgress } = {}) {
-    const g = await readGGUF(src);
+  static async load(gpu, src, { ctx = 4096, chunk = 64, gguf, onProgress } = {}) {
+    const g = gguf || await readGGUF(src);
     if (g.kv['general.architecture'] !== 'lfm3') throw new Error(`not an LFM3 model: ${g.kv['general.architecture']}`);
     const m = new LFM3(gpu, g, { ctx, chunk });
     await m.#stream(src, onProgress);
