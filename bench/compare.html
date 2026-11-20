@@ -520,8 +520,14 @@ function tildeRunner(opts = {}) {
       const kx = await import(TILDE + 'index.js');
       c.stage('loading');
       let t = now();
-      const llm = await kx.Tilde.load(GGUF_(), { ctx: c.ctx, ...opts, onProgress: ({ loaded, total }) => c.progress(`loading ${MB(loaded)} of ${MB(total)} MB`) });
+      // blackbox 'record': keep Tilde's crash record but not its back-off, so every run uses the settings asked for.
+      const llm = await kx.Tilde.load(GGUF_(), { ctx: c.ctx, ...opts, blackbox: 'record', onProgress: ({ loaded, total }) => c.progress(`loading ${MB(loaded)} of ${MB(total)} MB`) });
       const loadS = S(now() - t);
+      const bb = llm.blackbox?.report();
+      if (bb && bb.verdict !== 'none' && bb.verdict !== 'clean') {
+        const p = bb.previous || {};
+        c.note({ blackbox: `Tilde's last session ${bb.verdict === 'gpu-lost' ? 'lost the GPU' : bb.verdict === 'discarded' ? 'was discarded by iOS' : 'was killed'} during ${p.stage || '?'}${p.mb ? ` at ${p.mb} MB` : ''}${p.chunk ? `, chunk ${p.chunk}` : ''} (would back off to mem ${bb.levels.mem}, gpu ${bb.levels.gpu})` });
+      }
       c.stage('warm-up');
       await llm.generate(WARM, { maxTokens: 2, temperature: 0, repeatPenalty: 1 });
       const ids = llm.tokenizer.encode(c.text);
@@ -705,6 +711,7 @@ function why(q) {
   if (r.reason) bits.push(r.reason);
   if (r.waitedForGpuS) bits.push(`waited ${r.waitedForGpuS} s for a GPU first`);
   if (r.hidden) bits.push('page was hidden for part of it');
+  if (r.blackbox) bits.push(r.blackbox);
   if (r.build) bits.push(r.build + (r.threads ? `, ${r.threads} thread${r.threads > 1 ? 's' : ''}` : ''));
   if (r.engineMB) bits.push(`Tilde counted ${r.engineMB} MB` + (r.longestSubmitMs ? `, longest submit ${r.longestSubmitMs} ms` : '') + (r.chunkAtEnd ? `, chunk ${r.chunkAtEnd} at the end` : ''));
   if (r.wrote != null && r.wrote < (q.gen || 0)) bits.push(`wrote ${r.wrote}`);
