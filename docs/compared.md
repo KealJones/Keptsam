@@ -150,8 +150,10 @@ by design.
 - **Tilde doesn't use less memory than WebLLM.** At 4K it's 1,123 MB against WebLLM's 1,021 MB, and the two are
   counted differently. Tilde's case is that it survives iOS 27 without patches, needs no compile jobs, runs official
   GGUFs directly and swaps senses in and out.
-- **WebLLM reads prompts faster, paced or not.** Measured side by side on Nov 18: 75.5 against Tilde's 50 tok/s at
-  256 tokens, 66.7 against 34.9 at 1,024 (see the head-to-head above).
+- **Prompt reading flipped on Nov 19.** On Nov 18 WebLLM read faster, paced or not (75.5 against Tilde's 50 tok/s
+  at 256 tokens, 66.7 against 34.9 at 1,024). Since the Nov 19 kernel rewrite, Tilde reads 1.45× faster than stock
+  WebLLM at 256 and 1.57–1.75× faster than paced WebLLM at every size (see the Nov 19 runs above). WebLLM still loads
+  faster.
 - **Writing speed is about even** when both run on the same day (12.1–12.3 against 12.0 tok/s at 256); the 13.7
   from Nov 10 was before iOS 27.2.1.
 - **The wllama run doesn't record whether it used the GPU.** `result.webgpu` is only saved when a run finishes, so

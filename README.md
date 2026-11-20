@@ -86,9 +86,9 @@ day's kernel rewrite Tilde reads prompts faster than WebLLM (322 tok/s at 256 to
 against paced WebLLM's 205). LiteRT-LM is still the fastest where it ran, reading 1.5–3× faster than Tilde, but it,
 stock WebLLM and paced WebLLM all lost the GPU on a longer prompt.
 
-Tilde isn't the fastest: where WebLLM survives, it reads prompts 1.5–1.9× faster, and LiteRT-LM is faster still. Tilde is the only one that
-finished every prompt size, and it stays up on iOS 27 without patches, needs no compile jobs, reads Liquid's
-official GGUFs as they are and swaps senses in and out.
+Tilde isn't the fastest at everything: WebLLM loads faster and in a little less memory, and where LiteRT-LM runs it
+reads prompts faster still. Tilde is the only one that finished every prompt size on both models without patches, and
+it stays up on iOS 27, needs no compile jobs, reads Liquid's official GGUFs as they are and swaps senses in and out.
 
 ## Quick start
 
