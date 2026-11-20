@@ -17,14 +17,16 @@ The `~` is for the limits it lives under, which only ever come approximately: ~1
 
 ## What it gets you
 
-Measured on an iPhone 16 in Safari 27 with Liquid AI's LFM3 1.7B (QAD Q4_0), Nov 2026:
+Measured on an iPhone 16 in Safari 27.2 with Liquid AI's LFM3 1.7B (QAD Q4_0), Nov 19, 2026
+([runs](docs/runs/2026-11-19-iphone16-lfm3-kernels.md)). The same engine runs LFM3 Omni 2B with every sense (pictures,
+video with its sound, audio in, its own voice out) and Qwen3 0.6B; see [Models](#models).
 
-| | |
+| Measure | LFM3 1.7B |
 |---|---|
-| Prompt reading | **51 tok/s** |
-| Writing | **12.6 tok/s** |
-| Memory the engine holds | **1,123 MB** at a 4K context, every byte counted |
-| Reload from cache | **~5 s** |
+| Prompt reading | **139–157 tok/s** (64- or 256-token chunks) |
+| Writing | **12.3 tok/s** |
+| Memory the engine holds | **1,065–1,092 MB** at a 4K context, every byte counted |
+| Load from cache | **~4–6 s** |
 | Matches llama.cpp | same top 5 and **12/12 identical greedy tokens** on the same prompt |
 
 - **Never holds the whole file.** Weights arrive by HTTP range request, tensor by tensor, get repacked into the GPU
