@@ -1,0 +1,39 @@
+# A live copy of Tilde for every pull request from this repo, at
+#   https://kealjones.com/tilde/pr-preview/pr-<number>/
+# (e.g. .../pr-preview/pr-1/bench/compare.html; through the phone relay too:
+#   https://phone-relay.kealjones.workers.dev/tilde/pr-preview/pr-1/bench/compare.html?relay=…).
+# Published to the gh-pages branch next to the deployed site (deploy.yml), linked
+# from a comment on the PR, and removed when the PR closes. Same origin as the
+# real site, so models already downloaded there are reused. Forks get no preview.
+
+name: PR preview
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy the site
+        if: github.event.action != 'closed'
+        run: mkdir _site && git archive HEAD | tar -x -C _site && rm -rf _site/.github
+      - name: Publish or remove the preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: _site
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
+          pages-base-url: kealjones.com/tilde
+          action: auto
