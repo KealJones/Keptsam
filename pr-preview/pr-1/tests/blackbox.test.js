@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, nextLevels, backOff, BlackBox } from '../src/blackbox.js';
+import { classify, nextLevels, backOff, fitMemory, BlackBox } from '../src/blackbox.js';
 
 const mem = () => { const m = new Map(); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)) }; };
 const want = { ctx: 4096, chunk: 64, maxChunk: 256, submitBudgetMs: 2000 };
@@ -50,4 +50,33 @@ test('BlackBox: a killed session backs off the next one; a clean one does not', 
   assert.equal(c.settings.maxChunk, 128); // one good run isn't enough to relax
   const d = new BlackBox('m', want, { storage, target: null, apply: false, wasDiscarded: true });
   assert.deepEqual(d.settings, want); // apply: false keeps the requested settings
+});
+
+test('a kill while hidden or just after coming back is not held against Tilde', () => {
+  assert.equal(classify({ stage: 'gpu', hidden: true }), 'background');
+  assert.equal(classify({ stage: 'gpu', hidden: false, shownAt: 1000, seen: 3000 }), 'background');
+  assert.equal(classify({ stage: 'gpu', hidden: false, shownAt: 1000, seen: 9000 }), 'killed');
+  assert.equal(classify({ lost: true, hidden: true }), 'background');
+  assert.equal(classify({ hidden: true, closed: true }), 'clean');
+  assert.deepEqual(nextLevels({ mem: 1 }, 'background', { ran: true }), { mem: 1, gpu: 0, good: 0 });
+});
+
+test('a kill after everything was allocated fits the next session under 85% of that memory', () => {
+  // Qwen3 0.6B at a 16K context: ~430 MB weights, 1,792 MB KV, ~11 MB activations; died at 2,233 MB.
+  const l = nextLevels({}, 'killed', { stage: 'gpu', mb: 2233 });
+  assert.deepEqual(l, { mem: 0, gpu: 0, good: 0, capMB: 1898 });
+  const split = { fixedMB: 430, kvMB: 1792, actMB: 11, ctx: 16384, maxChunk: 64 };
+  const s = backOff({ ctx: 16384, chunk: 64, maxChunk: 64, submitBudgetMs: 1000 }, l, split);
+  assert.equal(s.ctx, 8192); // the KV cache was the big part, so the context halves; chunks stay
+  assert.equal(s.maxChunk, 64);
+  // Activations-heavy: the chunk shrinks first.
+  assert.deepEqual(fitMemory({ ctx: 4096, maxChunk: 1024 }, { fixedMB: 400, kvMB: 100, actMB: 900, ctx: 4096, maxChunk: 1024 }, 1000), { ctx: 4096, maxChunk: 512 });
+  // Floors: never below a 1,024 context or 16-token chunks.
+  assert.deepEqual(fitMemory({ ctx: 2048, maxChunk: 32 }, { fixedMB: 5000, kvMB: 10, actMB: 10, ctx: 2048, maxChunk: 32 }, 100), { ctx: 1024, maxChunk: 16 });
+  // A kill while loading (memory not all allocated) falls back to levels.
+  assert.deepEqual(nextLevels({}, 'killed', { stage: 'loading', mb: 865 }), { mem: 1, gpu: 0, good: 0 });
+  // Good runs loosen the cap 10% at a time.
+  let r = { mem: 0, gpu: 0, good: 0, capMB: 1898 };
+  for (let i = 0; i < 3; i++) r = nextLevels(r, 'clean', { ran: true });
+  assert.equal(r.capMB, 2088);
 });
