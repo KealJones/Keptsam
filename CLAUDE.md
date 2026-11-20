@@ -24,6 +24,11 @@ GPU; ~3 s per GPU command buffer). Read docs/design.md first; it is the contract
 
 Push straight to main. Commits are authored as Keal Jones with Claude as co-author (Co-Authored-By trailer).
 
+GitHub Pages serves the `gh-pages` branch: `.github/workflows/deploy.yml` copies main there on every push (after
+`npm test`), and `pr-preview.yml` puts each PR at `https://kealjones.com/tilde/pr-preview/pr-<n>/` (also reachable
+through the phone relay at `/tilde/pr-preview/pr-<n>/…`). Bigger or riskier changes go in a PR so they can be tried
+on the phone first.
+
 ## Checking against llama.cpp
 
 `bench/lfm3-check.html` runs a prompt through Tilde and compares the last-position logits and a greedy

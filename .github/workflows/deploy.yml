@@ -1,0 +1,47 @@
+# Publishes main to the gh-pages branch, which GitHub Pages serves
+# (Settings → Pages → Source: "Deploy from a branch", gh-pages, / (root)).
+# No build step: the site is the repo as it is. PR previews (pr-preview.yml)
+# live on the same branch under pr-preview/, which this leaves alone.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  pages:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy the site
+        run: mkdir _site && git archive HEAD | tar -x -C _site && rm -rf _site/.github
+      - name: Publish to gh-pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: _site
+          branch: gh-pages
+          clean: true
+          clean-exclude: pr-preview/
+          commit-message: "Deploy ${{ github.sha }}"
