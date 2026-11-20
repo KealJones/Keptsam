@@ -66,6 +66,8 @@ export class Tilde {
     if (bb) {
       k.blackbox = bb;
       bb.note({ stage: 'ready', mb: mb() });
+      const t = gpu.bytes, of = (tag) => Math.round((t.get(tag) || 0) / 1048576);
+      bb.split({ fixedMB: mb() - of('kv') - of('activations'), kvMB: of('kv'), actMB: of('activations'), ctx: model.ctx, maxChunk: model.maxChunk });
       gpu.onRun = (stage, ms) => bb.note(stage === 'gpu' ? { stage, chunk: model.chunk, mb: mb() } : { stage, ran: true, longestSubmitMs: Math.round(gpu.longestSubmit) });
       // A loss after a clean exit is the page tearing the device down, not a crash.
       gpu.whenLost.catch(() => { if (!bb.session.closed) bb.note({ lost: true }, true); });
