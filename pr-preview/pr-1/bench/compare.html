@@ -527,10 +527,10 @@ function tildeRunner(opts = {}) {
       const llm = await kx.Tilde.load(GGUF_(), { ctx: c.ctx, ...opts, blackbox: qs.get('blackbox') === 'apply' ? true : 'record', onProgress: ({ loaded, total }) => c.progress(`loading ${MB(loaded)} of ${MB(total)} MB`) });
       const loadS = S(now() - t);
       const bb = llm.blackbox?.report();
-      if (bb && qs.get('blackbox') === 'apply' && bb.settings.ctx !== c.ctx && (bb.verdict === 'none' || bb.verdict === 'clean')) c.note({ blackbox: `the black box set a ${bb.settings.ctx}-token context (asked for ${c.ctx}), from an earlier crash` });
+      if (bb && qs.get('blackbox') === 'apply' && bb.settings.ctx !== c.ctx && (bb.verdict === 'none' || bb.verdict === 'clean')) c.note({ blackbox: `the black box set a context of ${bb.settings.ctx} tokens (asked for ${c.ctx}), from an earlier crash` });
       if (bb && bb.verdict !== 'none' && bb.verdict !== 'clean') {
         const p = bb.previous || {};
-        const used = bb.settings.ctx !== c.ctx ? `; it used a ${bb.settings.ctx}-token context` + (bb.settings.maxChunk !== (opts.maxChunk ?? opts.chunk ?? 64) ? ` and ${bb.settings.maxChunk}-token chunks` : '') : '';
+        const used = bb.settings.ctx !== c.ctx ? `; it used a context of ${bb.settings.ctx} tokens` + (bb.settings.maxChunk !== (opts.maxChunk ?? opts.chunk ?? 64) ? ` and ${bb.settings.maxChunk}-token chunks` : '') : '';
         c.note({ blackbox: `Tilde's last session ${({ 'gpu-lost': 'lost the GPU', discarded: 'was discarded by iOS', background: 'ended while hidden or just after coming back' })[bb.verdict] || 'was killed'} during ${p.stage || '?'}${p.mb ? ` at ${p.mb} MB` : ''}${p.chunk ? `, chunk ${p.chunk}` : ''} (would back off to ${bb.levels.capMB != null ? `fit under ${bb.levels.capMB} MB` : `mem ${bb.levels.mem}`}, gpu ${bb.levels.gpu})${qs.get('blackbox') === 'apply' ? used : ''}` });
       }
       c.stage('warm-up');
