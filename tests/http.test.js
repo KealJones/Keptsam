@@ -1,5 +1,5 @@
 // httpSource against a fake server: Hugging Face's redirect, Safari losing Range on it, servers that ignore Range,
-// stalls and expired storage addresses (Keal's iPhone, 2026-11-17: asked for 16 MB, got the whole 1 GB file).
+// stalls and expired storage addresses (an iPhone 16, 2026-11-17: asked for 16 MB, got the whole 1 GB file).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { httpSource } from '../src/gguf.js';

@@ -24,7 +24,7 @@ export const GGML_TYPES = {
  * Reads byte ranges of a file over HTTP.
  *
  * Hugging Face answers with a redirect to its storage server, and iPhone Safari loses the Range header on that
- * redirect (Keal's iPhone, 2026-11-17: asked for 16 MB, got status 200 and the whole 1 GB file, which sat the
+ * redirect (an iPhone 16, 2026-11-17: asked for 16 MB, got status 200 and the whole 1 GB file, which sat the
  * download at 0% and then got the tab killed). So: after the first answer, reads go straight to the address the
  * redirect ended at (`res.url`), where Range is kept; a signed address that expires (401/403/410) sends reads
  * back to the original URL. A server that still answers 200 is read as a stream, skipping to the part asked for
