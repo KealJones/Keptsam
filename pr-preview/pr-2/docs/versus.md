@@ -6,7 +6,7 @@ JavaScript, WebAssembly and the GPU; ~3 s per GPU command buffer).
 
 - [What a model file holds](#what-a-model-file-holds-and-what-the-engine-has-to-know)
 - [wllama (llama.cpp)](#wllama-the-recipe-is-there-the-stack-underneath-isnt)
-- [WebLLM (MLC)](#webllm-faster-until-ios-27-stops-it)
+- [WebLLM (MLC)](#webllm-quick-to-load-until-ios-27-stops-it)
 - [transformers.js (ONNX)](#transformersjs-the-generic-runner)
 - [LiteRT-LM (Google)](#litert-lm-the-fastest-until-the-prompt-gets-long)
 
@@ -36,12 +36,14 @@ llama.cpp already knows LFM3, so writing another model adapter for wllama wouldn
 Fixing that means changing llama.cpp's WebGPU backend and maintaining a custom Wasm build: possible, but the work is
 in a large C++ codebase whose design fights the phone.
 
-## WebLLM: faster, until iOS 27 stops it
+## WebLLM: quick to load, until iOS 27 stops it
 
-![WebLLM reads prompts faster but queues big prompt pieces without waiting; Tilde sizes its submits by timing them](versus/webllm.svg)
+![WebLLM loads faster but queues big prompt pieces without waiting; Tilde sizes its submits by timing them](versus/webllm.svg)
 
-WebLLM is the fastest runtime here: with the same weights it reads prompts 1.5–1.9× faster than Tilde
-([run](runs/2026-11-18-iphone16-lfm3.md)). Its weak spot is how it feeds the GPU:
+WebLLM loads faster than Tilde (about 4 s against 5.6 s) and in ~50 MB less memory. On Nov 18 it also read prompts
+1.5–1.9× faster ([run](runs/2026-11-18-iphone16-lfm3.md)); since Tilde's Nov 19 kernel rewrite that has flipped, and
+Tilde reads 1.57–1.75× faster than paced WebLLM at every prompt size
+([run](runs/2026-11-19-iphone16-lfm3-vs-webllm-paced.md)). Its weak spot is how it feeds the GPU:
 
 - **Big pieces, no waiting.** It queues 256-token prompt pieces back to back, ~2.5 s each on the iPhone, and Safari
   27.2.1 kills the GPU when a command buffer waits more than 3 s. It survives only with Squiggle's patch, which
@@ -49,7 +51,7 @@ WebLLM is the fastest runtime here: with the same weights it reads prompts 1.5�
   ([what WebLLM needed](compared.md#what-webllm-needed-to-survive-ios-27)).
 - **Compiled ahead.** WebLLM had no LFM3 build; making one took eight compile jobs. Tilde reads Liquid's official GGUF.
 - **Tilde's side:** it times every submit and sizes the next one to stay well under the limit, so no patch is needed.
-  The cost is speed: Tilde's prompt reading is the gap to close.
+  Timing every submit used to cost speed; since the Nov 19 kernel rewrite it doesn't.
 
 ## transformers.js: the generic runner
 

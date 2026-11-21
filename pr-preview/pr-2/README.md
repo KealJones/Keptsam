@@ -17,14 +17,16 @@ The `~` is for the limits it lives under, which only ever come approximately: ~1
 
 ## What it gets you
 
-Measured on an iPhone 16 in Safari 27 with Liquid AI's LFM3 1.7B (QAD Q4_0), Nov 2026:
+Measured on an iPhone 16 in Safari 27.2 with Liquid AI's LFM3 1.7B (QAD Q4_0), Nov 19, 2026
+([runs](docs/runs/2026-11-19-iphone16-lfm3-kernels.md)). The same engine runs LFM3 Omni 2B with every sense (pictures,
+video with its sound, audio in, its own voice out) and Qwen3 0.6B; see [Models](#models).
 
-| | |
+| Measure | LFM3 1.7B |
 |---|---|
-| Prompt reading | **51 tok/s** |
-| Writing | **12.6 tok/s** |
-| Memory the engine holds | **1,123 MB** at a 4K context, every byte counted |
-| Reload from cache | **~5 s** |
+| Prompt reading | **139–157 tok/s** (64- or 256-token chunks) |
+| Writing | **12.3 tok/s** |
+| Memory the engine holds | **1,065–1,092 MB** at a 4K context, every byte counted |
+| Load from cache | **~4–6 s** |
 | Matches llama.cpp | same top 5 and **12/12 identical greedy tokens** on the same prompt |
 
 - **Never holds the whole file.** Weights arrive by HTTP range request, tensor by tensor, get repacked into the GPU
@@ -89,9 +91,9 @@ day's kernel rewrite Tilde reads prompts faster than WebLLM (322 tok/s at 256 to
 against paced WebLLM's 205). LiteRT-LM is still the fastest where it ran, reading 1.5–3× faster than Tilde, but it,
 stock WebLLM and paced WebLLM all lost the GPU on a longer prompt.
 
-Tilde isn't the fastest: where WebLLM survives, it reads prompts 1.5–1.9× faster, and LiteRT-LM is faster still. Tilde is the only one that
-finished every prompt size, and it stays up on iOS 27 without patches, needs no compile jobs, reads Liquid's
-official GGUFs as they are and swaps senses in and out.
+Tilde isn't the fastest at everything: WebLLM loads faster and in a little less memory, and where LiteRT-LM runs it
+reads prompts faster still. Tilde is the only one that finished every prompt size on both models without patches, and
+it stays up on iOS 27, needs no compile jobs, reads Liquid's official GGUFs as they are and swaps senses in and out.
 
 ## Quick start
 
