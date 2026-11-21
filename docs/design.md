@@ -141,9 +141,10 @@ identical greedy tokens for LFM3 1.7B (12/12 on "The capital of France is", max 
 | Writing | 4.0 tok/s (Q4_0 matvec 186 ms + Q6_K head 50 ms per token) | 11 tok/s (9 in headless Chrome) |
 
 On an iPhone in Safari with `?tilde-backend=cpu` (Nov 20, 2026), LFM3 1.7B wrote **10.3 tok/s** (66 tokens, first
-token after 1.7 s, 1,065 MB counted), on one thread. That is about 80% of the WebGPU path on the same phone (12.6
-tok/s) and roughly 6× wllama's CPU build there (1.4–1.8 tok/s). The phone's big core runs these int8 loops much
-faster than the VM above. Prompt reading is still the GPU's edge (51 tok/s there).
+token after 1.7 s, 1,065 MB counted), on one thread. That is about 84% of the WebGPU path on the same phone (12.3
+tok/s, Nov 19) and roughly 6× wllama's CPU build there (1.4–1.8 tok/s). The phone's big core runs these int8 loops much
+faster than the VM above. Prompt reading is where the GPU stays far ahead: 139–157 tok/s there, against roughly 12 on
+the CPU (a ~20-token chat prompt in 1.7 s).
 
 ## Testing
 
